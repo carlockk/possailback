@@ -85,10 +85,15 @@ const run = async () => {
   const summary = await request('/plataforma/resumen', { token: admin.data.token });
   assert.equal(summary.status, 200, JSON.stringify(summary.data));
   assert.equal(summary.data.totalNegocios, 2);
+  const platformUsers = await request('/plataforma/usuarios', { token: admin.data.token });
+  assert.equal(platformUsers.status, 200, JSON.stringify(platformUsers.data));
+  assert.equal(platformUsers.data.total, 2);
+  assert.deepEqual(platformUsers.data.usuarios.map((user) => user.negocio), ['Negocio de prueba', 'Negocio de prueba']);
   const detail = await request(`/plataforma/negocios/${a.data.tenantId}`, { token: admin.data.token });
   assert.equal(detail.status, 200, JSON.stringify(detail.data));
   assert.equal(detail.data.users.length, 1);
   assert.equal((await request('/plataforma/resumen', { token: a.data.token })).status, 403);
+  assert.equal((await request('/plataforma/usuarios', { token: a.data.token })).status, 403);
   assert.equal((await request('/locales', { token: admin.data.token })).status, 403);
 
   const suspended = await request(`/plataforma/negocios/${b.data.tenantId}/estado`, { token: admin.data.token, method: 'PATCH', body: { estado: 'suspendido' } });

@@ -44,6 +44,30 @@ router.get('/resumen', safe(async (_req, res) => {
   });
 }));
 
+router.get('/usuarios', safe(async (req, res) => {
+  const pagina = Math.max(1, Number.parseInt(req.query.pagina, 10) || 1);
+  const limite = 25;
+  const filtro = { tenantId: { $ne: null } };
+  const [users, total] = await Promise.all([
+    Usuario.find(filtro, 'nombre email rol tenantId local')
+      .sort({ _id: -1 }).skip((pagina - 1) * limite).limit(limite).lean(),
+    Usuario.countDocuments(filtro),
+  ]);
+  const tenantIds = [...new Set(users.map((user) => String(user.tenantId)))];
+  const tenants = await Tenant.find({ _id: { $in: tenantIds } }, 'nombre estado').lean();
+  const tenantById = new Map(tenants.map((tenant) => [String(tenant._id), tenant]));
+  return res.json({
+    usuarios: users.map((user) => ({
+      ...user,
+      negocio: tenantById.get(String(user.tenantId))?.nombre || 'Negocio no disponible',
+      estadoNegocio: tenantById.get(String(user.tenantId))?.estado || 'desconocido',
+    })),
+    total,
+    pagina,
+    totalPaginas: Math.max(1, Math.ceil(total / limite)),
+  });
+}));
+
 router.get('/negocios/:id', safe(async (req, res) => {
   if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(400).json({ error: 'Negocio invalido' });
   const tenant = await Tenant.findById(req.params.id).lean();
