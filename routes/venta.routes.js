@@ -1,0 +1,1046 @@
+const express = require('express');
+const mongoose = require('mongoose');
+const Venta = require('../models/venta.model.js');
+const VentaCliente = require('../models/ventaCliente.model.js');
+const ProductoLocal = require('../models/productLocal.model.js');
+const Caja = require('../models/caja.model.js');
+const Devolucion = require('../models/devolucion.model.js');
+const Descuento = require('../models/descuento.model.js');
+const { sanitizeText, sanitizeOptionalText } = require('../utils/input');
+const { adjuntarScopeLocal, requiereLocal } = require('../middlewares/localScope');
+const { requiereRol } = require('../middlewares/roles');
+
+const router = express.Router();
+router.use(adjuntarScopeLocal);
+router.use(requiereLocal);
+router.use(requiereRol('superadmin', 'admin', 'cajero'));
+
+const obtenerAtributosVariante = (variante) => {
+  if (!variante) return [];
+  const atributos = [];
+  if (variante.color) atributos.push({ nombre: 'Color', valor: variante.color });
+  if (variante.talla) atributos.push({ nombre: 'Talla', valor: variante.talla });
+  if (variante.sku) atributos.push({ nombre: 'SKU', valor: variante.sku });
+  return atributos;
+};
+
+const normalizarAgregadosVenta = (raw) => {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((agg) => {
+      const nombre = sanitizeOptionalText(agg?.nombre, { max: 80 }) || '';
+      if (!nombre) return null;
+      const precio = Number(agg?.precio);
+      return {
+        agregadoId: mongoose.Types.ObjectId.isValid(agg?.agregadoId) ? agg.agregadoId : null,
+        nombre,
+        precio: Number.isFinite(precio) && precio > 0 ? precio : 0
+      };
+    })
+    .filter(Boolean);
+};
+
+const normalizarPagosVenta = (raw) => {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((pago) => {
+      const tipo = sanitizeText(pago?.tipo, { max: 30 });
+      const monto = Number(pago?.monto);
+      if (!tipo || !Number.isFinite(monto) || monto <= 0) return null;
+      return {
+        tipo,
+        monto: Math.round(monto)
+      };
+    })
+    .filter(Boolean);
+};
+
+const calcularDescuento = (montoBase, descuento) => {
+  const base = Math.max(0, Math.round(Number(montoBase) || 0));
+  if (!descuento || base <= 0) return 0;
+  const valor = Number(descuento.valor) || 0;
+  const calculado = descuento.tipo === 'porcentaje'
+    ? Math.round(base * Math.min(Math.max(valor, 0), 100) / 100)
+    : Math.round(Math.max(valor, 0));
+  return Math.min(base, calculado);
+};
+
+const normalizarDescuentoManual = (raw) => {
+  if (!raw || typeof raw !== 'object') return null;
+  const tipo = raw.tipo === 'porcentaje' ? 'porcentaje' : raw.tipo === 'fijo' ? 'fijo' : null;
+  const valor = Number(raw.valor);
+  if (!tipo || !Number.isFinite(valor) || valor <= 0) return null;
+  return {
+    descuentoId: null,
+    nombre: sanitizeOptionalText(raw.nombre, { max: 80 }) || 'Descuento manual',
+    tipo,
+    valor: tipo === 'porcentaje'
+      ? Math.min(Math.max(valor, 0), 100)
+      : Math.round(Math.max(valor, 0)),
+    manual: true
+  };
+};
+
+const resolverDescuento = async (raw, localId, session, mensajeNoDisponible) => {
+  if (!raw || typeof raw !== 'object') return null;
+
+  const descuentoId = raw.descuentoId || raw._id || null;
+  if (descuentoId) {
+    if (!mongoose.Types.ObjectId.isValid(descuentoId)) {
+      const error = new Error('El descuento seleccionado es invalido.');
+      error.status = 400;
+      throw error;
+    }
+
+    const descuento = await Descuento.findOne({ _id: descuentoId, local: localId, activo: true }).session(session);
+    if (!descuento) {
+      const error = new Error(mensajeNoDisponible);
+      error.status = 400;
+      throw error;
+    }
+    return descuento;
+  }
+
+  return normalizarDescuentoManual(raw);
+};
+
+const snapshotDescuento = (descuento, monto) => descuento ? ({
+  descuentoId: descuento.descuentoId || descuento._id || null,
+  nombre: descuento.nombre,
+  tipo: descuento.tipo,
+  valor: descuento.valor,
+  monto,
+  manual: Boolean(descuento.manual) || !(descuento.descuentoId || descuento._id)
+}) : null;
+
+const obtenerPagosAplicados = (venta) => {
+  if (Array.isArray(venta.pagos) && venta.pagos.length > 0) {
+    return venta.pagos
+      .map((pago) => ({
+        tipo: pago?.tipo || 'Otro',
+        monto: Number(pago?.monto) || 0
+      }))
+      .filter((pago) => pago.monto > 0);
+  }
+
+  return [{
+    tipo: venta.tipo_pago || 'Otro',
+    monto: Number(venta.total) || 0
+  }];
+};
+
+const calcularStockDesdeVariantes = (variantes = []) => {
+  const stocks = variantes
+    .map((variante) => {
+      if (variante?.stock === null || variante?.stock === undefined || variante?.stock === '') return null;
+      return Number(variante.stock);
+    })
+    .filter((stock) => Number.isFinite(stock) && stock >= 0);
+  if (stocks.length === 0) return null;
+  return stocks.reduce((acc, stock) => acc + stock, 0);
+};
+
+const toPlainVenta = (venta) => {
+  if (!venta) return {};
+  return typeof venta.toObject === 'function' ? venta.toObject() : venta;
+};
+
+const consolidarVentas = (ventasPos = [], ventasWeb = []) => ([
+  ...ventasPos.map((venta) => ({ ...toPlainVenta(venta), canal: 'POS' })),
+  ...ventasWeb.map((venta) => ({ ...toPlainVenta(venta), canal: 'WEB' }))
+]);
+
+const armarDesglosePorTipoProducto = async (ventas = [], localId) => {
+  const ids = new Set();
+  ventas.forEach((venta) => {
+    venta.productos?.forEach((item) => {
+      if (item?.productoId) {
+        ids.add(item.productoId.toString());
+      }
+    });
+  });
+
+  if (ids.size === 0) {
+    return {};
+  }
+
+  const idsArray = [...ids];
+  const productosLocal = await ProductoLocal.find({
+    _id: { $in: idsArray },
+    local: localId
+  })
+    .select('productoBase')
+    .populate({
+      path: 'productoBase',
+      select: 'categoria',
+      populate: { path: 'categoria', select: 'nombre' }
+    })
+    .lean();
+
+  const categoriaPorProducto = new Map();
+  productosLocal.forEach((producto) => {
+    const categoriaNombre = producto.productoBase?.categoria?.nombre || 'Sin categoria';
+    categoriaPorProducto.set(producto._id.toString(), categoriaNombre);
+  });
+
+  const porTipoProducto = {};
+  ventas.forEach((venta) => {
+    venta.productos?.forEach((item) => {
+      const productoId = item?.productoId ? item.productoId.toString() : null;
+      const categoria = productoId && categoriaPorProducto.get(productoId)
+        ? categoriaPorProducto.get(productoId)
+        : 'Sin categoria';
+      const precio = Number(item?.precio_unitario) || 0;
+      const cantidad = Number(item?.cantidad) || 0;
+      const subtotal = precio * cantidad;
+
+      if (subtotal <= 0) return;
+      porTipoProducto[categoria] = (porTipoProducto[categoria] || 0) + subtotal;
+    });
+  });
+
+  return porTipoProducto;
+};
+
+const armarResumenPorProducto = (ventas = []) => {
+  const porProducto = new Map();
+
+  ventas.forEach((venta) => {
+    venta.productos?.forEach((item) => {
+      const nombreBase = item?.nombre || 'Producto sin nombre';
+      const atributos = Array.isArray(item?.atributos) ? item.atributos : [];
+      const detalleAtributos = atributos
+        .map((atributo) => {
+          const nombre = sanitizeOptionalText(atributo?.nombre, { max: 30 }) || '';
+          const valor = sanitizeOptionalText(atributo?.valor, { max: 60 }) || '';
+          if (!nombre || !valor) return null;
+          return `${nombre}: ${valor}`;
+        })
+        .filter(Boolean);
+      const varianteNombre = sanitizeOptionalText(item?.varianteNombre, { max: 80 }) || '';
+      const detalle = detalleAtributos.length > 0
+        ? detalleAtributos.join(' | ')
+        : varianteNombre;
+      const nombre = detalle ? `${nombreBase} (${detalle})` : nombreBase;
+      const cantidad = Number(item?.cantidad) || 0;
+      const precio = Number(item?.precio_unitario) || 0;
+      if (cantidad <= 0 || precio < 0) return;
+
+      const actual = porProducto.get(nombre) || { nombre, cantidad: 0, total: 0 };
+      actual.cantidad += cantidad;
+      actual.total += cantidad * precio;
+      porProducto.set(nombre, actual);
+    });
+  });
+
+  return [...porProducto.values()].sort((a, b) => b.total - a.total);
+};
+
+const armarDesglosePorTipoPago = (ventas = []) => {
+  const porTipoPago = {};
+  const porTipoPagoDetallado = { POS: {}, WEB: {} };
+
+  ventas.forEach((venta) => {
+    const canal = venta.canal === 'WEB' ? 'WEB' : 'POS';
+
+    obtenerPagosAplicados(venta).forEach((pago) => {
+      const llaveConCanal = `${pago.tipo} (${canal})`;
+      porTipoPago[llaveConCanal] = (porTipoPago[llaveConCanal] || 0) + pago.monto;
+      porTipoPagoDetallado[canal][pago.tipo] =
+        (porTipoPagoDetallado[canal][pago.tipo] || 0) + pago.monto;
+    });
+  });
+
+  return { porTipoPago, porTipoPagoDetallado };
+};
+
+/**
+ * @swagger
+ * tags:
+ *   name: Ventas
+ *   description: Gestión de ventas del sistema POS
+ */
+
+/**
+ * @swagger
+ * /ventas:
+ *   get:
+ *     summary: Obtener historial de todas las ventas
+ *     tags: [Ventas]
+ *     responses:
+ *       200:
+ *         description: Bloque de ventas ordenadas por fecha descendente y cursor para el siguiente bloque
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       500:
+ *         description: Error interno del servidor
+ */
+router.get('/', async (req, res) => {
+  try {
+    const filtro = { local: req.localId };
+    if (req.userRole === 'cajero') {
+      if (!req.userId) {
+        return res.status(400).json({ error: 'Usuario requerido' });
+      }
+      filtro.usuario = req.userId;
+    }
+    const limite = Math.min(Math.max(Number.parseInt(req.query.limite, 10) || 50, 1), 50);
+    const desde = req.query.desde ? new Date(req.query.desde) : null;
+    const hasta = req.query.hasta ? new Date(req.query.hasta) : null;
+    if ((desde && Number.isNaN(desde.getTime())) || (hasta && Number.isNaN(hasta.getTime()))) {
+      return res.status(400).json({ error: 'Filtro de fecha invalido' });
+    }
+    if (desde || hasta) {
+      filtro.fecha = {};
+      if (desde) filtro.fecha.$gte = desde;
+      if (hasta) filtro.fecha.$lt = hasta;
+    }
+
+    const busqueda = sanitizeText(req.query.buscar, { max: 80 });
+    if (busqueda) {
+      const patron = new RegExp(busqueda.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      const numeros = /^\d+$/.test(busqueda)
+        ? Array.from({ length: 100 }, (_, numero) => numero).filter((numero) => String(numero).includes(busqueda))
+        : [];
+      filtro.$or = [
+        { 'productos.nombre': patron },
+        { 'productos.varianteNombre': patron },
+        ...(numeros.length ? [{ numero_pedido: { $in: numeros } }] : [])
+      ];
+    }
+
+    if (req.query.cursorFecha || req.query.cursorId) {
+      const cursorFecha = new Date(req.query.cursorFecha);
+      if (!req.query.cursorFecha || !mongoose.Types.ObjectId.isValid(req.query.cursorId) || Number.isNaN(cursorFecha.getTime())) {
+        return res.status(400).json({ error: 'Cursor invalido' });
+      }
+      filtro.$and = [{ $or: [
+        { fecha: { $lt: cursorFecha } },
+        { fecha: cursorFecha, _id: { $lt: new mongoose.Types.ObjectId(req.query.cursorId) } }
+      ] }];
+    }
+
+    const ventas = await Venta.find(filtro)
+      .select('numero_pedido fecha total tipo_pago usuario cobrador_nombre estado')
+      .populate('usuario', 'nombre email')
+      .sort({ fecha: -1, _id: -1 })
+      .limit(limite + 1)
+      .lean();
+    const hayMas = ventas.length > limite;
+    const items = hayMas ? ventas.slice(0, limite) : ventas;
+    const ultima = items.at(-1);
+    return res.json({
+      items,
+      siguiente: hayMas ? { fecha: ultima.fecha.toISOString(), id: String(ultima._id) } : null
+    });
+  } catch (err) {
+    console.error('Error al obtener historial:', err);
+    res.status(500).json({ error: 'Error interno al obtener historial' });
+  }
+});
+
+router.get('/detalle/:id', async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Venta invalida' });
+    }
+    const filtro = { _id: req.params.id, local: req.localId };
+    if (req.userRole === 'cajero') {
+      if (!req.userId) return res.status(400).json({ error: 'Usuario requerido' });
+      filtro.usuario = req.userId;
+    }
+    const venta = await Venta.findOne(filtro)
+      .populate('usuario', 'nombre email rol')
+      .populate('anulacion.usuario', 'nombre email')
+      .lean();
+    if (!venta) return res.status(404).json({ error: 'Venta no encontrada' });
+    const devoluciones = await Devolucion.find({ venta: venta._id, local: req.localId })
+      .select('venta caja local usuario monto motivo tipo_pago fecha')
+      .populate('usuario', 'nombre email')
+      .sort({ fecha: -1 })
+      .lean();
+    return res.json({ ...venta, devoluciones });
+  } catch (err) {
+    console.error('Error al obtener detalle de venta:', err);
+    return res.status(500).json({ error: 'No se pudo obtener el ticket' });
+  }
+});
+
+router.get('/anulaciones', async (req, res) => {
+  try {
+    if (!['admin', 'superadmin'].includes(req.userRole)) {
+      return res.status(403).json({ error: 'No tienes permisos para ver anulaciones' });
+    }
+    const ventas = await Venta.find({ local: req.localId, estado: 'anulada' })
+      .select('numero_pedido fecha productos subtotal descuento_total descuento_venta total tipo_pago pagos tipo_pedido monto_recibido vuelto usuario anulacion estado')
+      .populate('usuario', 'nombre email')
+      .populate('anulacion.usuario', 'nombre email')
+      .sort({ 'anulacion.fecha': -1 })
+      .lean();
+    return res.json(ventas);
+  } catch (err) {
+    console.error('Error al obtener anulaciones:', err);
+    return res.status(500).json({ error: 'No se pudieron obtener las anulaciones' });
+  }
+});
+
+router.post('/:id/anular', async (req, res) => {
+  if (!['admin', 'superadmin'].includes(req.userRole)) {
+    return res.status(403).json({ error: 'No tienes permisos para anular ventas' });
+  }
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    return res.status(400).json({ error: 'Venta invalida' });
+  }
+  const motivo = sanitizeText(req.body?.motivo, { max: 300 });
+  if (!motivo) return res.status(400).json({ error: 'El motivo de anulacion es obligatorio' });
+
+  const session = await mongoose.startSession();
+  try {
+    session.startTransaction();
+    const venta = await Venta.findOne({ _id: req.params.id, local: req.localId }).session(session);
+    if (!venta) {
+      const error = new Error('Venta no encontrada');
+      error.status = 404;
+      throw error;
+    }
+    if (venta.estado === 'anulada') {
+      const error = new Error('La venta ya fue anulada');
+      error.status = 409;
+      throw error;
+    }
+    if (venta.origen_cobro !== 'pos') {
+      const error = new Error('Solo se pueden anular ventas del POS desde esta opcion');
+      error.status = 400;
+      throw error;
+    }
+
+    const caja = await Caja.findOne({ cierre: null, local: req.localId }).session(session);
+    if (!caja || (venta.caja && String(venta.caja) !== String(caja._id)) ||
+        (!venta.caja && new Date(venta.fecha) < new Date(caja.apertura))) {
+      const error = new Error('Solo puedes anular ventas de la caja que sigue abierta');
+      error.status = 409;
+      throw error;
+    }
+    if (await Devolucion.exists({ venta: venta._id, local: req.localId }).session(session)) {
+      const error = new Error('La venta tiene devoluciones registradas y no se puede anular');
+      error.status = 409;
+      throw error;
+    }
+
+    const anulacion = { fecha: new Date(), motivo, usuario: req.userId || null, caja: caja._id };
+    const marcada = await Venta.findOneAndUpdate(
+      { _id: venta._id, local: req.localId, estado: { $ne: 'anulada' } },
+      { $set: { estado: 'anulada', anulacion } },
+      { session, new: true }
+    );
+    if (!marcada) {
+      const error = new Error('La venta ya fue anulada');
+      error.status = 409;
+      throw error;
+    }
+
+    for (const item of venta.productos) {
+      if (item.stock_descontado === false) continue;
+      const producto = await ProductoLocal.findOne({ _id: item.productoId, local: req.localId }).session(session);
+      if (!producto) {
+        const error = new Error(`No se pudo reponer el stock de ${item.nombre}: producto eliminado`);
+        error.status = 409;
+        throw error;
+      }
+      const cantidad = Number(item.cantidad) || 0;
+      if (item.varianteId) {
+        const variante = producto.variantes.id(item.varianteId);
+        if (!variante) {
+          const error = new Error(`No se pudo reponer el stock de ${item.nombre}: variante eliminada`);
+          error.status = 409;
+          throw error;
+        }
+        if (typeof variante.stock !== 'number' || !Number.isFinite(variante.stock)) {
+          if (item.stock_descontado === true) {
+            const error = new Error(`No se pudo reponer el stock de ${item.nombre}: variante sin control de stock`);
+            error.status = 409;
+            throw error;
+          }
+          continue;
+        }
+        variante.stock += cantidad;
+        producto.stock = calcularStockDesdeVariantes(producto.variantes);
+      } else {
+        if (producto.variantes.length > 0) {
+          const error = new Error(`No se pudo reponer el stock de ${item.nombre}: ahora tiene variantes`);
+          error.status = 409;
+          throw error;
+        }
+        if (typeof producto.stock !== 'number' || !Number.isFinite(producto.stock)) {
+          if (item.stock_descontado === true) {
+            const error = new Error(`No se pudo reponer el stock de ${item.nombre}: sin control de stock`);
+            error.status = 409;
+            throw error;
+          }
+          continue;
+        }
+        producto.stock += cantidad;
+      }
+      await producto.save({ session });
+    }
+
+    await session.commitTransaction();
+    return res.json({ mensaje: 'Venta anulada', venta: marcada });
+  } catch (err) {
+    await session.abortTransaction().catch(() => {});
+    console.error('Error al anular venta:', err);
+    const conflicto = err.code === 112 || err.codeName === 'WriteConflict';
+    return res.status(err.status || (conflicto ? 409 : 500)).json({
+      error: conflicto ? 'La venta o el stock cambió durante la anulación. Intenta nuevamente.' : (err.message || 'No se pudo anular la venta')
+    });
+  } finally {
+    session.endSession();
+  }
+});
+
+router.post('/:id/devoluciones', async (req, res) => {
+  let session;
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Venta invalida' });
+    }
+
+    const monto = Math.round(Number(req.body?.monto));
+    const motivo = sanitizeText(req.body?.motivo, { max: 300 });
+    const tipoPago = sanitizeText(req.body?.tipo_pago, { max: 30 });
+    if (!Number.isFinite(monto) || monto <= 0) {
+      return res.status(400).json({ error: 'Monto de devolucion invalido' });
+    }
+    if (!motivo) return res.status(400).json({ error: 'El motivo es obligatorio' });
+    if (!tipoPago) return res.status(400).json({ error: 'El medio de devolucion es obligatorio' });
+
+    session = await mongoose.startSession();
+    session.startTransaction();
+    const venta = await Venta.findOneAndUpdate(
+      { _id: req.params.id, local: req.localId, estado: { $ne: 'anulada' } },
+      { $inc: { revision: 1 } },
+      { session, new: true }
+    );
+    if (!venta) {
+      const existente = await Venta.exists({ _id: req.params.id, local: req.localId }).session(session);
+      const error = new Error(existente ? 'La venta ya esta anulada' : 'Venta no encontrada');
+      error.status = existente ? 409 : 404;
+      throw error;
+    }
+    const caja = await Caja.findOne({ cierre: null, local: req.localId }).session(session);
+    if (!caja) {
+      const error = new Error('Debes tener una caja abierta para devolver dinero');
+      error.status = 400;
+      throw error;
+    }
+
+    const acumulado = await Devolucion.aggregate([
+      { $match: { venta: venta._id, local: new mongoose.Types.ObjectId(req.localId) } },
+      { $group: { _id: null, total: { $sum: '$monto' } } }
+    ]).session(session);
+    const yaDevuelto = Number(acumulado[0]?.total) || 0;
+    const disponible = Math.max(0, (Number(venta.total) || 0) - yaDevuelto);
+    if (monto > disponible) {
+      const error = new Error(`El monto supera el saldo disponible de $${disponible.toLocaleString('es-CL')}`);
+      error.status = 400;
+      throw error;
+    }
+
+    const devolucion = new Devolucion({
+      venta: venta._id,
+      caja: caja._id,
+      local: req.localId,
+      usuario: req.userId || null,
+      monto,
+      motivo,
+      tipo_pago: tipoPago
+    });
+    await devolucion.save({ session });
+    await session.commitTransaction();
+
+    res.status(201).json({
+      mensaje: 'Devolucion registrada',
+      devolucion,
+      total_devuelto: yaDevuelto + monto,
+      saldo_disponible: disponible - monto
+    });
+  } catch (err) {
+    if (session?.inTransaction()) await session.abortTransaction().catch(() => {});
+    console.error('Error al registrar devolucion:', err);
+    res.status(err.status || (err.code === 112 ? 409 : 500)).json({ error: err.status ? err.message : 'No se pudo registrar la devolucion. Intenta nuevamente.' });
+  } finally {
+    if (session) session.endSession();
+  }
+});
+
+/**
+ * @swagger
+ * /ventas/resumen:
+ *   get:
+ *     summary: Obtener resumen de ventas por fecha
+ *     tags: [Ventas]
+ *     parameters:
+ *       - name: fecha
+ *         in: query
+ *         required: true
+ *         schema:
+ *           type: string
+ *           example: "2024-07-19"
+ *     responses:
+ *       200:
+ *         description: Resumen con total, cantidad y pagos por tipo
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 total:
+ *                   type: number
+ *                 cantidad:
+ *                   type: number
+ *                 porTipoPago:
+ *                   type: object
+ *                 porTipoProducto:
+ *                   type: object
+ *       400:
+ *         description: Fecha requerida
+ *       500:
+ *         description: Error interno del servidor
+ */
+router.get('/resumen', async (req, res) => {
+  const { fecha } = req.query;
+
+  if (!fecha) {
+    return res.status(400).json({ error: 'Fecha requerida' });
+  }
+
+  try {
+    const inicio = new Date(`${fecha}T00:00:00`);
+    const fin = new Date(`${fecha}T23:59:59.999`);
+
+    const filtro = {
+      fecha: { $gte: inicio, $lte: fin },
+      local: req.localId,
+      estado: { $ne: 'anulada' }
+    };
+    if (req.userRole === 'cajero') {
+      if (!req.userId) {
+        return res.status(400).json({ error: 'Usuario requerido' });
+      }
+      filtro.usuario = req.userId;
+    }
+
+    const filtroWeb = {
+      fecha: { $gte: inicio, $lte: fin },
+      local: req.localId,
+      estado_pedido: /^entregado$/i
+    };
+
+    const [ventasPos, ventasWeb] = await Promise.all([
+      Venta.find(filtro)
+        .select('productos total tipo_pago pagos fecha numero_pedido')
+        .lean(),
+      VentaCliente.find(filtroWeb)
+        .select('productos total tipo_pago pagos fecha numero_pedido estado_pedido')
+        .lean()
+    ]);
+    const ventasConsolidadas = consolidarVentas(ventasPos, ventasWeb);
+
+    const totalPos = ventasPos.reduce((acc, v) => acc + (Number(v.total) || 0), 0);
+    const totalWeb = ventasWeb.reduce((acc, v) => acc + (Number(v.total) || 0), 0);
+    const total = totalPos + totalWeb;
+    const cantidadPos = ventasPos.length;
+    const cantidadWeb = ventasWeb.length;
+    const cantidad = cantidadPos + cantidadWeb;
+
+    const { porTipoPago, porTipoPagoDetallado } = armarDesglosePorTipoPago(ventasConsolidadas);
+    const porTipoProducto = await armarDesglosePorTipoProducto(ventasConsolidadas, req.localId);
+    const porProducto = armarResumenPorProducto(ventasConsolidadas);
+
+    res.json({
+      total,
+      cantidad,
+      porTipoPago,
+      porTipoPagoDetallado,
+      porTipoProducto,
+      porProducto,
+      totalesPorCanal: {
+        POS: { total: totalPos, cantidad: cantidadPos },
+        WEB: { total: totalWeb, cantidad: cantidadWeb }
+      }
+    });
+  } catch (err) {
+    console.error('Error al obtener resumen:', err);
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+});
+
+/**
+ * @swagger
+ * /ventas/resumen-rango:
+ *   get:
+ *     summary: Obtener resumen de ventas por rango de fechas
+ *     tags: [Ventas]
+ *     parameters:
+ *       - name: inicio
+ *         in: query
+ *         required: true
+ *         schema:
+ *           type: string
+ *           example: "2024-07-01"
+ *       - name: fin
+ *         in: query
+ *         required: true
+ *         schema:
+ *           type: string
+ *           example: "2024-07-31"
+ *     responses:
+ *       200:
+ *         description: Resumen con total, cantidad y pagos por tipo
+ *       400:
+ *         description: Fechas requeridas
+ *       500:
+ *         description: Error interno
+ */
+router.get('/resumen-rango', async (req, res) => {
+  const { inicio, fin } = req.query;
+
+  if (!inicio || !fin) {
+    return res.status(400).json({ error: 'Se requieren las fechas de inicio y fin' });
+  }
+
+  try {
+    const fechaInicio = new Date(`${inicio}T00:00:00`);
+    const fechaFin = new Date(`${fin}T23:59:59.999`);
+
+    const filtro = {
+      fecha: { $gte: fechaInicio, $lte: fechaFin },
+      local: req.localId,
+      estado: { $ne: 'anulada' }
+    };
+    if (req.userRole === 'cajero') {
+      if (!req.userId) {
+        return res.status(400).json({ error: 'Usuario requerido' });
+      }
+      filtro.usuario = req.userId;
+    }
+
+    const filtroWeb = {
+      fecha: { $gte: fechaInicio, $lte: fechaFin },
+      local: req.localId,
+      estado_pedido: /^entregado$/i
+    };
+
+    const [ventasPos, ventasWeb] = await Promise.all([
+      Venta.find(filtro)
+        .select('productos total tipo_pago pagos fecha numero_pedido')
+        .lean(),
+      VentaCliente.find(filtroWeb)
+        .select('productos total tipo_pago pagos fecha numero_pedido estado_pedido')
+        .lean()
+    ]);
+    const ventasConsolidadas = consolidarVentas(ventasPos, ventasWeb);
+
+    const totalPos = ventasPos.reduce((acc, v) => acc + (Number(v.total) || 0), 0);
+    const totalWeb = ventasWeb.reduce((acc, v) => acc + (Number(v.total) || 0), 0);
+    const total = totalPos + totalWeb;
+    const cantidadPos = ventasPos.length;
+    const cantidadWeb = ventasWeb.length;
+    const cantidad = cantidadPos + cantidadWeb;
+
+    const { porTipoPago, porTipoPagoDetallado } = armarDesglosePorTipoPago(ventasConsolidadas);
+    const porTipoProducto = await armarDesglosePorTipoProducto(ventasConsolidadas, req.localId);
+    const porProducto = armarResumenPorProducto(ventasConsolidadas);
+
+    res.json({
+      total,
+      cantidad,
+      porTipoPago,
+      porTipoPagoDetallado,
+      porTipoProducto,
+      porProducto,
+      totalesPorCanal: {
+        POS: { total: totalPos, cantidad: cantidadPos },
+        WEB: { total: totalWeb, cantidad: cantidadWeb }
+      }
+    });
+  } catch (err) {
+    console.error('Error al obtener resumen por rango:', err);
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+});
+
+/**
+ * @swagger
+ * /ventas:
+ *   post:
+ *     summary: Registrar una nueva venta
+ *     tags: [Ventas]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               productos:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *               total:
+ *                 type: number
+ *               tipo_pago:
+ *                 type: string
+ *               tipo_pedido:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Venta registrada exitosamente
+ *       500:
+ *         description: Error al registrar venta
+ */
+router.post('/', async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    session.startTransaction();
+
+    const { productos, total, tipo_pago, tipo_pedido, monto_recibido, vuelto, pagos, descuento_venta } = req.body;
+    const tipoPago = sanitizeText(tipo_pago, { max: 30 });
+    const tipoPedido = sanitizeOptionalText(tipo_pedido, { max: 40 }) || '';
+
+    if (!tipoPago) {
+      const error = new Error('El tipo de pago es requerido.');
+      error.status = 400;
+      throw error;
+    }
+
+    if (!Array.isArray(productos) || productos.length === 0) {
+      const error = new Error('La venta debe incluir al menos un producto.');
+      error.status = 400;
+      throw error;
+    }
+
+    const totalNumerico = Number(total);
+    if (Number.isNaN(totalNumerico) || totalNumerico < 0) {
+      const error = new Error('El total de la venta es inválido.');
+      error.status = 400;
+      throw error;
+    }
+
+    const pagosNormalizados = normalizarPagosVenta(pagos);
+    if (totalNumerico > 0 && pagos !== undefined && pagosNormalizados.length === 0) {
+      const error = new Error('Debes ingresar al menos un pago válido.');
+      error.status = 400;
+      throw error;
+    }
+
+    if (pagosNormalizados.length > 0) {
+      const totalPagos = pagosNormalizados.reduce((sum, pago) => sum + pago.monto, 0);
+      if (Math.abs(totalPagos - totalNumerico) > 1) {
+        const error = new Error('La suma de pagos debe coincidir con el total de la venta.');
+        error.status = 400;
+        throw error;
+      }
+    }
+
+    const montoRecibidoNumerico =
+      monto_recibido === null || monto_recibido === undefined || monto_recibido === ''
+        ? null
+        : Number(monto_recibido);
+    if (montoRecibidoNumerico !== null && (Number.isNaN(montoRecibidoNumerico) || montoRecibidoNumerico < 0)) {
+      const error = new Error('El monto recibido es inválido.');
+      error.status = 400;
+      throw error;
+    }
+
+    const vueltoNumerico =
+      vuelto === null || vuelto === undefined || vuelto === ''
+        ? null
+        : Number(vuelto);
+    if (vueltoNumerico !== null && Number.isNaN(vueltoNumerico)) {
+      const error = new Error('El vuelto es inválido.');
+      error.status = 400;
+      throw error;
+    }
+
+    const cajaAbierta = await Caja.findOne({
+      cierre: null,
+      local: req.localId
+    }).session(session);
+    if (!cajaAbierta) {
+      const error = new Error('Debes abrir la caja antes de registrar ventas.');
+      error.status = 400;
+      throw error;
+    }
+
+    const productosRegistrados = [];
+    let subtotalBruto = 0;
+    let subtotalConDescuentosItem = 0;
+
+    const descuentoVenta = await resolverDescuento(
+      descuento_venta,
+      req.localId,
+      session,
+      'El descuento general seleccionado no esta disponible.'
+    );
+
+    for (const item of productos) {
+      if (!item?.productoId) {
+        const error = new Error('Cada producto debe incluir su identificador.');
+        error.status = 400;
+        throw error;
+      }
+
+      const cantidadSolicitada = Number(item.cantidad);
+      if (!Number.isFinite(cantidadSolicitada) || cantidadSolicitada <= 0) {
+        const error = new Error('La cantidad solicitada debe ser mayor que 0.');
+        error.status = 400;
+        throw error;
+      }
+
+      const producto = await ProductoLocal.findOne({
+        _id: item.productoId,
+        local: req.localId
+      })
+        .populate('productoBase')
+        .session(session);
+      if (!producto) {
+        const error = new Error('Producto no encontrado.');
+        error.status = 404;
+        throw error;
+      }
+
+      const nombreProducto = producto.productoBase?.nombre || '';
+
+      const usaVariantes = Array.isArray(producto.variantes) && producto.variantes.length > 0;
+      let varianteSeleccionada = null;
+      let stockDescontado = false;
+
+      if (item.varianteId) {
+        varianteSeleccionada = producto.variantes.id(item.varianteId);
+        if (!varianteSeleccionada) {
+          const error = new Error('La variante seleccionada no existe.');
+          error.status = 404;
+          throw error;
+        }
+      }
+
+      if (usaVariantes) {
+        if (!varianteSeleccionada) {
+          const error = new Error(`Debes seleccionar una variante para ${nombreProducto}.`);
+          error.status = 400;
+          throw error;
+        }
+
+        const controlaStockVariante =
+          typeof varianteSeleccionada.stock === 'number' &&
+          !Number.isNaN(varianteSeleccionada.stock);
+        if (controlaStockVariante) {
+          if (varianteSeleccionada.stock < cantidadSolicitada) {
+            const error = new Error(
+              `Stock insuficiente para ${nombreProducto} (${varianteSeleccionada.nombre}). Disponible: ${varianteSeleccionada.stock}`
+            );
+            error.status = 400;
+            throw error;
+          }
+
+          varianteSeleccionada.stock -= cantidadSolicitada;
+          producto.stock = calcularStockDesdeVariantes(producto.variantes);
+          stockDescontado = true;
+        }
+      } else {
+        const controlaStock = typeof producto.stock === 'number' && !Number.isNaN(producto.stock);
+        if (controlaStock) {
+          if (producto.stock < cantidadSolicitada) {
+            const error = new Error(`Stock insuficiente para ${nombreProducto}. Disponible: ${producto.stock}`);
+            error.status = 400;
+            throw error;
+          }
+
+          producto.stock -= cantidadSolicitada;
+          stockDescontado = true;
+        }
+      }
+
+      await producto.save({ session });
+
+      const precioOriginal =
+        Number(
+          item.precio_unitario ??
+            (varianteSeleccionada && varianteSeleccionada.precio !== undefined
+              ? varianteSeleccionada.precio
+              : producto.precio)
+        ) || 0;
+
+      const descuentoItem = await resolverDescuento(
+        item?.descuento,
+        req.localId,
+        session,
+        `El descuento de ${nombreProducto} no esta disponible.`
+      );
+      const montoDescuentoUnitario = calcularDescuento(precioOriginal, descuentoItem);
+      const precioUnitario = Math.max(0, precioOriginal - montoDescuentoUnitario);
+      subtotalBruto += precioOriginal * cantidadSolicitada;
+      subtotalConDescuentosItem += precioUnitario * cantidadSolicitada;
+
+      productosRegistrados.push({
+        productoId: producto._id,
+        nombre: nombreProducto || 'Producto sin nombre',
+        precio_unitario: precioUnitario,
+        precio_original: precioOriginal,
+        descuento: snapshotDescuento(descuentoItem, montoDescuentoUnitario),
+        cantidad: cantidadSolicitada,
+        stock_descontado: stockDescontado,
+        observacion: sanitizeOptionalText(item.observacion, { max: 120 }) || '',
+        varianteId: varianteSeleccionada?._id || null,
+        varianteNombre: item.varianteNombre || varianteSeleccionada?.nombre || null,
+        atributos: obtenerAtributosVariante(varianteSeleccionada),
+        agregados: normalizarAgregadosVenta(item.agregados)
+      });
+    }
+
+    const montoDescuentoVenta = calcularDescuento(subtotalConDescuentosItem, descuentoVenta);
+    const totalCalculado = Math.max(0, subtotalConDescuentosItem - montoDescuentoVenta);
+    const descuentoItemsTotal = subtotalBruto - subtotalConDescuentosItem;
+    const descuentoTotal = descuentoItemsTotal + montoDescuentoVenta;
+    if (Math.abs(totalCalculado - totalNumerico) > 1) {
+      const error = new Error('El total no coincide con los descuentos aplicados. Actualiza el carrito e intenta nuevamente.');
+      error.status = 400;
+      throw error;
+    }
+
+    const venta = new Venta({
+      productos: productosRegistrados,
+      subtotal: subtotalBruto,
+      descuento_total: descuentoTotal,
+      descuento_venta: snapshotDescuento(descuentoVenta, montoDescuentoVenta),
+      total: totalCalculado,
+      tipo_pago: tipoPago,
+      pagos: pagosNormalizados.length > 0 ? pagosNormalizados : [{ tipo: tipoPago, monto: Math.round(totalCalculado) }],
+      tipo_pedido: tipoPedido,
+      monto_recibido: montoRecibidoNumerico,
+      vuelto: vueltoNumerico,
+      fecha: new Date(),
+      numero_pedido: Math.floor(Math.random() * 100),
+      local: req.localId,
+      caja: cajaAbierta._id,
+      usuario: req.userId || null
+    });
+
+    await venta.save({ session });
+    await session.commitTransaction();
+
+    res.json({ mensaje: 'Venta registrada', numero_pedido: venta.numero_pedido, venta });
+  } catch (err) {
+    await session.abortTransaction().catch(() => {});
+    console.error('Error al registrar venta:', err);
+    res.status(err.status || 500).json({ error: err.message || 'Error interno al registrar venta' });
+  } finally {
+    session.endSession();
+  }
+});
+
+module.exports = router;
