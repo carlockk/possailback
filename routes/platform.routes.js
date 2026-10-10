@@ -16,8 +16,10 @@ router.use(safe(async (req, res, next) => {
   if (!payload || payload.rol !== 'platform_admin') {
     return res.status(403).json({ error: 'Acceso reservado al administrador de plataforma' });
   }
-  const user = await runAsPlatform(async () => await Usuario.findById(payload.id).select('rol').lean());
-  if (!user || user.rol !== 'platform_admin') return res.status(403).json({ error: 'Acceso denegado' });
+  const user = await runAsPlatform(async () => await Usuario.findById(payload.id).select('rol tokenVersion').lean());
+  if (!user || user.rol !== 'platform_admin' || Number(user.tokenVersion || 0) !== Number(payload.ver || 0)) {
+    return res.status(403).json({ error: 'Acceso denegado' });
+  }
   req.platformUserId = String(user._id);
   return runAsPlatform(next);
 }));

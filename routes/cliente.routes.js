@@ -5,6 +5,8 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const Cliente = require('../models/Cliente');
 const { getJwtSecret } = require('../utils/jwtConfig');
+const { authRateLimit } = require('../utils/authRateLimit');
+const { validPassword } = require('../utils/passwordPolicy');
 const {
   sanitizeText,
   sanitizeOptionalText,
@@ -61,7 +63,7 @@ const readLocalIdFromHeader = (req) => {
  *       500:
  *         description: Error al registrar cliente
  */
-router.post('/register', async (req, res) => {
+router.post('/register', authRateLimit({ scope: 'customer-register', ipLimit: 10, windowMs: 60 * 60 * 1000 }), async (req, res) => {
   try {
     const localId = readLocalIdFromHeader(req);
     const nombre = sanitizeText(req.body.nombre, { max: 80 });
@@ -72,12 +74,12 @@ router.post('/register', async (req, res) => {
 
     if (!nombre) return res.status(400).json({ msg: 'Nombre requerido.' });
     if (!isValidEmail(email)) return res.status(400).json({ msg: 'Email inv lido.' });
-    if (!password) return res.status(400).json({ msg: 'Password requerida.' });
+    if (!validPassword(password)) return res.status(400).json({ msg: 'Contraseña de 12 a 72 bytes requerida.' });
 
     const existe = await Cliente.findOne({ email });
     if (existe) return res.status(400).json({ msg: 'El cliente ya existe.' });
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const hashedPassword = await bcrypt.hash(password, 12);
 
     const nuevoCliente = new Cliente({
       nombre,
@@ -102,7 +104,7 @@ router.post('/register', async (req, res) => {
       token
     });
   } catch (error) {
-    res.status(500).json({ msg: 'Error al registrar cliente.', error });
+    res.status(500).json({ msg: 'Error al registrar cliente.' });
   }
 });
 
@@ -132,7 +134,10 @@ router.post('/register', async (req, res) => {
  *       500:
  *         description: Error en el servidor
  */
-router.post('/login', async (req, res) => {
+router.post('/login', authRateLimit({
+  scope: 'customer-login', ipLimit: 30, emailLimit: 10, windowMs: 15 * 60 * 1000,
+  emailFromRequest: (req) => `${req.tenantId || ''}:${normalizeEmail(req.body?.email)}`
+}), async (req, res) => {
   try {
     const email = normalizeEmail(req.body.email);
     const password = typeof req.body.password === 'string' ? req.body.password : '';
@@ -142,10 +147,10 @@ router.post('/login', async (req, res) => {
     }
 
     const cliente = await Cliente.findOne({ email });
-    if (!cliente) return res.status(400).json({ msg: 'Email no registrado.' });
+    if (!cliente) return res.status(401).json({ msg: 'Credenciales inválidas.' });
 
     const isMatch = await bcrypt.compare(password, cliente.password);
-    if (!isMatch) return res.status(400).json({ msg: 'Contraseña incorrecta.' });
+    if (!isMatch) return res.status(401).json({ msg: 'Credenciales inválidas.' });
 
     const token = jwt.sign({ id: cliente._id, rol: 'cliente', tenantId: req.tenantId }, JWT_SECRET, { expiresIn: '7d' });
 
@@ -159,7 +164,7 @@ router.post('/login', async (req, res) => {
       token
     });
   } catch (error) {
-    res.status(500).json({ msg: 'Error al iniciar sesión.', error });
+    res.status(500).json({ msg: 'Error al iniciar sesión.' });
   }
 });
 

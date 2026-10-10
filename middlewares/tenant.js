@@ -81,8 +81,9 @@ const tenantMiddleware = async (req, res, next) => {
         const client = await runForTenant(tenantId, async () => await Cliente.exists({ _id: payload.id }));
         if (!client) return res.status(401).json({ error: 'Sesion de cliente invalida' });
       } else {
-        const user = await runAsPlatform(async () => await Usuario.findById(payload.id).select('tenantId rol local').lean());
+        const user = await runAsPlatform(async () => await Usuario.findById(payload.id).select('tenantId rol local tokenVersion').lean());
         if (!user || String(user.tenantId) !== String(tenantId) || user.rol !== payload.rol ||
+            Number(user.tokenVersion || 0) !== Number(payload.ver || 0) ||
             (user.rol !== 'superadmin' && String(user.local || '') !== String(payload.localId || ''))) {
           return res.status(401).json({ error: 'Sesion invalida' });
         }

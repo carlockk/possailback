@@ -19,6 +19,7 @@ const signUserToken = (usuario) => {
     rol: String(usuario.rol || ""),
     localId: localId ? String(localId) : null,
     tenantId: usuario.tenantId ? String(usuario.tenantId) : null,
+    ver: Number(usuario.tokenVersion || 0),
   };
 
   return jwt.sign(payload, getJwtSecret(), { expiresIn: getJwtExpiresIn() });

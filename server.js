@@ -52,8 +52,16 @@ const corsOrigin = mergedOrigins.length
   : true;
 
 app.use(cors({ origin: corsOrigin, credentials: true }));
+app.disable('x-powered-by');
+app.use('/api', (_req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Referrer-Policy', 'no-referrer');
+  next();
+});
 app.use(
   express.json({
+    limit: '1mb',
     verify: (req, _res, buf) => {
       if (req.originalUrl === "/api/pagos/webhook") {
         req.rawBody = buf.toString();
@@ -61,7 +69,7 @@ app.use(
     },
   })
 );
-app.use(express.urlencoded({ extended: true }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 app.use(
   "/uploads",
   express.static(path.join(__dirname, "uploads"), {
@@ -80,12 +88,8 @@ app.get("/", (req, res) => {
 
 // 🩺 Endpoint de healthcheck
 app.get("/health", (req, res) => {
-  res.status(200).json({
-    status: "ok",
-    uptime: process.uptime(),
-    timestamp: Date.now(),
-    message: "Backend POS saludable",
-  });
+  const ready = mongoose.connection.readyState === 1;
+  res.status(ready ? 200 : 503).json({ status: ready ? 'ok' : 'unavailable' });
 });
 
 // 📦 Rutas

@@ -96,9 +96,31 @@ const run = async () => {
   assert.equal((await request('/plataforma/usuarios', { token: a.data.token })).status, 403);
   assert.equal((await request('/locales', { token: admin.data.token })).status, 403);
 
-  const suspended = await request(`/plataforma/negocios/${b.data.tenantId}/estado`, { token: admin.data.token, method: 'PATCH', body: { estado: 'suspendido' } });
+  const wrongChange = await request('/auth/password', {
+    token: admin.data.token, method: 'POST',
+    body: { currentPassword: 'incorrecta', newPassword: `${password}-nuevo` }
+  });
+  assert.equal(wrongChange.status, 401);
+  assert.equal((await request('/plataforma/resumen', { token: admin.data.token })).status, 200);
+  const changed = await request('/auth/password', {
+    token: admin.data.token, method: 'POST',
+    body: { currentPassword: password, newPassword: `${password}-nuevo` }
+  });
+  assert.equal(changed.status, 200, JSON.stringify(changed.data));
+  assert.equal((await request('/plataforma/resumen', { token: admin.data.token })).status, 403);
+  assert.equal((await request('/auth/login', { method: 'POST', body: { email: 'platform-test@example.com', password } })).status, 401);
+  const changedLogin = await request('/auth/login', { method: 'POST', body: { email: 'platform-test@example.com', password: `${password}-nuevo` } });
+  assert.equal(changedLogin.status, 200, JSON.stringify(changedLogin.data));
+
+  const suspended = await request(`/plataforma/negocios/${b.data.tenantId}/estado`, { token: changedLogin.data.token, method: 'PATCH', body: { estado: 'suspendido' } });
   assert.equal(suspended.status, 200, JSON.stringify(suspended.data));
   assert.equal((await request('/locales', { token: b.data.token })).status, 403);
+  const weak = await request('/auth/register', { method: 'POST', body: { negocio: 'Débil', nombre: 'Prueba', email: 'weak@example.com', password: '123456' } });
+  assert.equal(weak.status, 400);
+  for (let index = 0; index < 2; index += 1) {
+    assert.equal((await request('/auth/register', { method: 'POST', body: {} })).status, 400);
+  }
+  assert.equal((await request('/auth/register', { method: 'POST', body: {} })).status, 429);
   console.log('SaaS: registro, aislamiento entre negocios, panel y suspensión correctos');
 };
 

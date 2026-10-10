@@ -5,6 +5,7 @@ const Local = require('../models/local.model');
 const Tenant = require('../models/tenant.model');
 const Usuario = require('../models/usuario.model.js');
 const { sanitizeText, normalizeEmail, isValidEmail } = require('../utils/input');
+const { validPassword } = require('../utils/passwordPolicy');
 const { adjuntarScopeLocal, requiereLocal } = require('../middlewares/localScope');
 
 const router = express.Router();
@@ -63,8 +64,8 @@ router.post('/', requireAdmin, async (req, res) => {
   const localRaw = req.body.local;
   let localId = req.localId;
 
-  if (!nombre || !isValidEmail(email) || !password || !rol) {
-    return res.status(400).json({ error: 'Faltan campos' });
+  if (!nombre || !isValidEmail(email) || !validPassword(password) || !rol) {
+    return res.status(400).json({ error: 'Completa los campos y usa una contraseña de 12 a 72 bytes' });
   }
   if (!ROLES_VALIDOS.has(rol)) {
     return res.status(400).json({ error: 'Rol inv lido' });
@@ -102,7 +103,7 @@ router.post('/', requireAdmin, async (req, res) => {
       return res.status(400).json({ error: 'El usuario ya existe' });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const hashedPassword = await bcrypt.hash(password, 12);
     const nuevo = new Usuario({ nombre, email, password: hashedPassword, rol, tenantId: req.tenantId, local: esRepartidorGlobal ? null : localId });
     await nuevo.save();
 
@@ -238,10 +239,11 @@ router.put('/:id', requireAdmin, async (req, res) => {
       actualizacion.nombre = nombreLimpio;
     }
     if (Object.prototype.hasOwnProperty.call(req.body, 'password')) {
-      if (typeof password !== 'string' || !password) {
-        return res.status(400).json({ error: 'Password inv lida' });
+      if (!validPassword(password)) {
+        return res.status(400).json({ error: 'Contraseña de 12 a 72 bytes requerida' });
       }
-      actualizacion.password = await bcrypt.hash(password, 10);
+      actualizacion.password = await bcrypt.hash(password, 12);
+      actualizacion.$inc = { tokenVersion: 1 };
     }
     if (Object.prototype.hasOwnProperty.call(req.body, 'rol')) {
       const rolLimpio = typeof rol === 'string' ? rol.trim() : '';

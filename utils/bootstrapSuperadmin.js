@@ -1,6 +1,7 @@
 const bcrypt = require('bcryptjs');
 const Usuario = require('../models/usuario.model.js');
 const { runAsPlatform } = require('./tenantContext');
+const { validPassword } = require('./passwordPolicy');
 
 const bootstrapSuperadmin = ({ force = false } = {}) => runAsPlatform(async () => {
   if (!force && process.env.BOOTSTRAP_SUPERADMIN !== 'true') return;
@@ -15,8 +16,8 @@ const bootstrapSuperadmin = ({ force = false } = {}) => runAsPlatform(async () =
   const password = process.env.SUPERADMIN_PASSWORD || '';
   const nombre = String(process.env.SUPERADMIN_NAME || 'Administrador').trim();
 
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || password.length < 12 || !nombre) {
-    throw new Error('Configura SUPERADMIN_EMAIL y SUPERADMIN_PASSWORD (minimo 12 caracteres)');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !validPassword(password) || !nombre) {
+    throw new Error('Configura SUPERADMIN_EMAIL y SUPERADMIN_PASSWORD (12 a 72 bytes)');
   }
 
   if (await Usuario.exists({ email })) {
@@ -25,7 +26,7 @@ const bootstrapSuperadmin = ({ force = false } = {}) => runAsPlatform(async () =
 
   await Usuario.create({
     email,
-    password: await bcrypt.hash(password, 10),
+    password: await bcrypt.hash(password, 12),
     nombre,
     rol: 'platform_admin'
   });

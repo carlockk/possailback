@@ -7,69 +7,19 @@ const { runAsPlatform, runForTenant } = require('../utils/tenantContext');
 const { sanitizeText } = require('../utils/input');
 const { normalizeEmail, isValidEmail } = require('../utils/input');
 const { signUserToken } = require('../utils/authToken');
+const { getAuthPayloadFromRequest } = require('../utils/authToken');
+const { authRateLimit } = require('../utils/authRateLimit');
+const { validPassword } = require('../utils/passwordPolicy');
 
 const router = express.Router();
 router.use((_req, _res, next) => runAsPlatform(next));
-const FAILED_ATTEMPTS_WINDOW_MS = 10 * 60 * 1000;
-const MAX_FAILED_ATTEMPTS = 5;
-const BLOCK_DURATION_MS = 15 * 60 * 1000;
-const loginAttempts = new Map();
-const registerAttempts = new Map();
-
-const getClientIp = (req) => req.ip || req.connection?.remoteAddress || 'unknown';
-
-const getAttemptKey = (req, email) => `${getClientIp(req)}|${email}`;
-
-const getAttemptState = (key) => {
-  const current = loginAttempts.get(key);
-  if (!current) return null;
-  if (current.lockUntil && current.lockUntil > Date.now()) return current;
-  if (current.expiresAt && current.expiresAt < Date.now()) {
-    loginAttempts.delete(key);
-    return null;
-  }
-  return current;
-};
-
-const registerFailedAttempt = (key) => {
-  const now = Date.now();
-  const current = getAttemptState(key);
-  const nextCount = current ? current.count + 1 : 1;
-  const next = {
-    count: nextCount,
-    expiresAt: now + FAILED_ATTEMPTS_WINDOW_MS
-  };
-  if (nextCount >= MAX_FAILED_ATTEMPTS) {
-    next.lockUntil = now + BLOCK_DURATION_MS;
-  }
-  loginAttempts.set(key, next);
-};
-
-const clearAttemptState = (key) => {
-  loginAttempts.delete(key);
-};
-
-router.post('/register', async (req, res) => {
-  const ip = getClientIp(req);
-  const current = registerAttempts.get(ip);
-  const now = Date.now();
-  if (registerAttempts.size > 1000) {
-    for (const [key, attempt] of registerAttempts) {
-      if (attempt.expiresAt <= now) registerAttempts.delete(key);
-    }
-  }
-  if (current?.expiresAt > now && current.count >= 5) {
-    return res.status(429).json({ error: 'Demasiados registros. Intenta más tarde' });
-  }
-  registerAttempts.set(ip, current?.expiresAt > now
-    ? { count: current.count + 1, expiresAt: current.expiresAt }
-    : { count: 1, expiresAt: now + 60 * 60 * 1000 });
+router.post('/register', authRateLimit({ scope: 'tenant-register', ipLimit: 5, windowMs: 60 * 60 * 1000 }), async (req, res) => {
   const nombre = sanitizeText(req.body?.nombre, { max: 80 });
   const negocio = sanitizeText(req.body?.negocio, { max: 100 });
   const email = normalizeEmail(req.body?.email);
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
-  if (!nombre || !negocio || !isValidEmail(email) || password.length < 12) {
-    return res.status(400).json({ error: 'Completa nombre, negocio, correo y contraseña de al menos 12 caracteres' });
+  if (!nombre || !negocio || !isValidEmail(email) || !validPassword(password)) {
+    return res.status(400).json({ error: 'Completa nombre, negocio, correo y contraseña de 12 a 72 bytes' });
   }
 
   let tenant;
@@ -156,7 +106,10 @@ router.post('/register', async (req, res) => {
  *       401:
  *         description: Usuario no encontrado o contraseña incorrecta
  */
-router.post('/login', async (req, res) => {
+router.post('/login', authRateLimit({
+  scope: 'user-login', ipLimit: 30, emailLimit: 10, windowMs: 15 * 60 * 1000,
+  emailFromRequest: (req) => normalizeEmail(req.body?.email)
+}), async (req, res) => {
   const email = normalizeEmail(req.body.email);
   const password = typeof req.body.password === 'string' ? req.body.password : '';
 
@@ -164,30 +117,14 @@ router.post('/login', async (req, res) => {
     return res.status(400).json({ error: 'Credenciales invalidas' });
   }
 
-  const attemptKey = getAttemptKey(req, email);
-  const attemptState = getAttemptState(attemptKey);
-  if (attemptState?.lockUntil && attemptState.lockUntil > Date.now()) {
-    return res.status(429).json({ error: 'Demasiados intentos. Intenta nuevamente en unos minutos.' });
-  }
-
   const usuario = await Usuario.findOne({ email });
   if (!usuario) {
-    registerFailedAttempt(attemptKey);
     return res.status(401).json({ error: 'Credenciales invalidas' });
   }
 
-  let match = false;
-  if (typeof usuario.password === 'string' && usuario.password.startsWith('$2')) {
-    match = await bcrypt.compare(password, usuario.password);
-  } else {
-    match = password === usuario.password;
-    if (match) {
-      usuario.password = await bcrypt.hash(password, 10);
-      await usuario.save();
-    }
-  }
+  const match = typeof usuario.password === 'string' && usuario.password.startsWith('$2')
+    && await bcrypt.compare(password, usuario.password);
   if (!match) {
-    registerFailedAttempt(attemptKey);
     return res.status(401).json({ error: 'Credenciales invalidas' });
   }
 
@@ -206,7 +143,6 @@ router.post('/login', async (req, res) => {
     }
   }
 
-  clearAttemptState(attemptKey);
   const token = signUserToken(usuario);
 
   res.json({
@@ -227,6 +163,30 @@ router.post('/login', async (req, res) => {
         }
       : null
   });
+});
+
+router.post('/password', authRateLimit({ scope: 'password-change', ipLimit: 10, windowMs: 60 * 60 * 1000 }), async (req, res) => {
+  const payload = getAuthPayloadFromRequest(req);
+  if (!payload || payload.rol === 'cliente') return res.status(401).json({ error: 'Sesión inválida' });
+  const currentPassword = typeof req.body?.currentPassword === 'string' ? req.body.currentPassword : '';
+  const newPassword = req.body?.newPassword;
+  if (!currentPassword || !validPassword(newPassword) || currentPassword === newPassword) {
+    return res.status(400).json({ error: 'La nueva contraseña debe ser diferente y tener entre 12 y 72 bytes' });
+  }
+  const user = await Usuario.findById(payload.id);
+  if (!user || user.rol !== payload.rol || Number(user.tokenVersion || 0) !== Number(payload.ver || 0)) {
+    return res.status(401).json({ error: 'Sesión inválida' });
+  }
+  if (!await bcrypt.compare(currentPassword, user.password)) {
+    return res.status(401).json({ error: 'Contraseña actual incorrecta' });
+  }
+  const passwordHash = await bcrypt.hash(newPassword, 12);
+  const changed = await Usuario.findOneAndUpdate(
+    { _id: user._id, password: user.password },
+    { $set: { password: passwordHash }, $inc: { tokenVersion: 1 } }
+  );
+  if (!changed) return res.status(409).json({ error: 'La contraseña cambió. Inicia sesión nuevamente.' });
+  return res.json({ message: 'Contraseña actualizada. Inicia sesión nuevamente.' });
 });
 
 module.exports = router;
