@@ -8,7 +8,7 @@ const run = async () => {
   if (!process.env.MONGO_URI) throw new Error('Configura MONGO_URI antes de crear el administrador');
 
   await mongoose.connect(process.env.MONGO_URI, {
-    dbName: process.env.MONGO_DB_NAME || 'davimotors'
+    dbName: process.env.MONGO_DB_NAME || 'possail'
   });
 
   try {

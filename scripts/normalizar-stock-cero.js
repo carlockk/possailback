@@ -43,7 +43,7 @@ const main = async () => {
   }
 
   await mongoose.connect(process.env.MONGO_URI, {
-    dbName: process.env.MONGO_DB_NAME || 'davimotors'
+    dbName: process.env.MONGO_DB_NAME || 'possail'
   });
 
   const filtroLocales = {};

@@ -21,8 +21,7 @@ const normalizeOrigin = (value) =>
     .replace(/^['"]|['"]$/g, "")
     .replace(/\/+$/, "");
 
-const allowedOrigins = (process.env.CORS_ORIGINS || "")
-  .split(",")
+const allowedOrigins = ["https://possail.vercel.app", ...(process.env.CORS_ORIGINS || "").split(",")]
   .map((origin) => normalizeOrigin(origin))
   .filter(Boolean);
 const allowLocalhostCors = String(process.env.CORS_ALLOW_LOCALHOST || "false").toLowerCase() === "true";
@@ -34,12 +33,6 @@ const extraOrigins = allowLocalhostCors
 const allowVercelPreviewCors =
   String(process.env.CORS_ALLOW_VERCEL_PREVIEW || "false").toLowerCase() === "true";
 const mergedOrigins = Array.from(new Set([...allowedOrigins, ...extraOrigins]));
-const isProduction = process.env.NODE_ENV === "production";
-
-if (isProduction && mergedOrigins.length === 0) {
-  throw new Error("CORS_ORIGINS es obligatorio en produccion");
-}
-
 const corsOrigin = mergedOrigins.length
   ? (origin, callback) => {
       const requestOrigin = normalizeOrigin(origin);
@@ -142,7 +135,7 @@ app.listen(PORT, "0.0.0.0", () => {
 // 🔌 Conexión MongoDB
 mongoose
   .connect(process.env.MONGO_URI, {
-    dbName: process.env.MONGO_DB_NAME || "davimotors",
+    dbName: process.env.MONGO_DB_NAME || "possail",
   })
   .then(() => {
     console.log("✅ Conectado a MongoDB");

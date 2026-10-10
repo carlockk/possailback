@@ -34,7 +34,7 @@ const main = async () => {
     throw new Error('Falta MONGO_URI en .env');
   }
 
-  await mongoose.connect(process.env.MONGO_URI, { dbName: process.env.MONGO_DB_NAME || 'davimotors' });
+  await mongoose.connect(process.env.MONGO_URI, { dbName: process.env.MONGO_DB_NAME || 'possail' });
 
   if (process.argv.includes('--list-locales')) {
     const allLocales = await Local.find({}, 'nombre direccion').sort({ nombre: 1 }).lean();
