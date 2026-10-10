@@ -10,6 +10,7 @@ const { signUserToken } = require('../utils/authToken');
 const { getAuthPayloadFromRequest } = require('../utils/authToken');
 const { authRateLimit } = require('../utils/authRateLimit');
 const { validPassword } = require('../utils/passwordPolicy');
+const deleteTenantData = require('../utils/deleteTenantData');
 
 const router = express.Router();
 router.use((_req, _res, next) => runAsPlatform(next));
@@ -187,6 +188,42 @@ router.post('/password', authRateLimit({ scope: 'password-change', ipLimit: 10, 
   );
   if (!changed) return res.status(409).json({ error: 'La contraseña cambió. Inicia sesión nuevamente.' });
   return res.json({ message: 'Contraseña actualizada. Inicia sesión nuevamente.' });
+});
+
+router.delete('/cuenta', authRateLimit({ scope: 'account-delete', ipLimit: 10, windowMs: 60 * 60 * 1000 }), async (req, res) => {
+  const payload = getAuthPayloadFromRequest(req);
+  if (!payload || payload.rol !== 'superadmin' || !mongoose.Types.ObjectId.isValid(payload.tenantId)) {
+    return res.status(403).json({ error: 'Solo el propietario puede eliminar el negocio' });
+  }
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  if (!password) return res.status(400).json({ error: 'Ingresa tu contraseña para confirmar' });
+
+  const user = await Usuario.findById(payload.id);
+  const tenant = await Tenant.findById(payload.tenantId);
+  if (!user || !tenant || String(user.tenantId) !== String(tenant._id) ||
+      String(tenant.ownerUser) !== String(user._id) || user.rol !== 'superadmin' ||
+      Number(user.tokenVersion || 0) !== Number(payload.ver || 0)) {
+    return res.status(403).json({ error: 'Solo el propietario puede eliminar el negocio' });
+  }
+  if (!await bcrypt.compare(password, user.password)) {
+    return res.status(401).json({ error: 'Contraseña incorrecta' });
+  }
+
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      const currentTenant = await Tenant.findOne({ _id: tenant._id, ownerUser: user._id }).session(session);
+      const currentUser = await Usuario.findOne({ _id: user._id, tenantId: tenant._id, rol: 'superadmin', tokenVersion: payload.ver }).session(session);
+      if (!currentTenant || !currentUser) throw new Error('La cuenta cambió. Inicia sesión nuevamente.');
+      await deleteTenantData(tenant._id, session);
+      await Tenant.deleteOne({ _id: tenant._id, ownerUser: user._id }).session(session);
+    });
+    return res.json({ message: 'La cuenta y los datos del negocio fueron eliminados' });
+  } catch (error) {
+    return res.status(500).json({ error: 'No se pudo eliminar la cuenta. Inténtalo nuevamente.' });
+  } finally {
+    await session.endSession();
+  }
 });
 
 module.exports = router;

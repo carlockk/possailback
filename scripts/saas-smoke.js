@@ -6,6 +6,7 @@ const bcrypt = require('bcryptjs');
 const { runAsPlatform, runForTenant } = require('../utils/tenantContext');
 const Usuario = require('../models/usuario.model');
 const Categoria = require('../models/categoria.model');
+const { signUserToken } = require('../utils/authToken');
 
 require('dotenv').config({ path: require('node:path').join(__dirname, '..', '.env') });
 const databaseName = `possail_saas_test_${crypto.randomBytes(4).toString('hex')}`;
@@ -115,6 +116,26 @@ const run = async () => {
   const suspended = await request(`/plataforma/negocios/${b.data.tenantId}/estado`, { token: changedLogin.data.token, method: 'PATCH', body: { estado: 'suspendido' } });
   assert.equal(suspended.status, 200, JSON.stringify(suspended.data));
   assert.equal((await request('/locales', { token: b.data.token })).status, 403);
+  assert.equal((await request('/auth/cuenta', { token: a.data.token, method: 'DELETE', body: { password: 'incorrecta' } })).status, 401);
+  assert.equal((await request('/locales', { token: a.data.token })).status, 200);
+  assert.equal((await request('/auth/cuenta', { token: changedLogin.data.token, method: 'DELETE', body: { password } })).status, 403);
+  const secondaryAdmin = await runForTenant(a.data.tenantId, async () => await Usuario.create({
+    nombre: 'Otro administrador', email: 'saas-test-secondary@example.com',
+    password: await bcrypt.hash(password, 10), rol: 'superadmin', tenantId: a.data.tenantId,
+  }));
+  assert.equal((await request('/auth/cuenta', { token: signUserToken(secondaryAdmin), method: 'DELETE', body: { password } })).status, 403);
+  const deletedAccount = await request('/auth/cuenta', { token: a.data.token, method: 'DELETE', body: { password } });
+  assert.equal(deletedAccount.status, 200, JSON.stringify(deletedAccount.data));
+  assert.equal((await request('/auth/login', { method: 'POST', body: { email: 'saas-test-a@example.com', password } })).status, 401);
+  assert.equal((await request('/locales', { token: a.data.token })).status, 401);
+  assert.equal((await runAsPlatform(() => mongoose.model('Tenant').countDocuments({ _id: a.data.tenantId }))), 0);
+  for (const name of mongoose.modelNames()) {
+    const model = mongoose.model(name);
+    if (model.schema.path('tenantId')) {
+      assert.equal(await runAsPlatform(async () => await model.countDocuments({ tenantId: a.data.tenantId })), 0, name);
+    }
+  }
+  assert.equal((await request('/plataforma/negocios/' + b.data.tenantId, { token: changedLogin.data.token })).status, 200);
   const weak = await request('/auth/register', { method: 'POST', body: { negocio: 'Débil', nombre: 'Prueba', email: 'weak@example.com', password: '123456' } });
   assert.equal(weak.status, 400);
   for (let index = 0; index < 2; index += 1) {
@@ -130,7 +151,7 @@ run().then(async () => {
   await mongoose.disconnect();
   process.exit(0);
 }).catch(async (error) => {
-  console.error('Prueba SaaS falló:', error.message);
+  console.error('Prueba SaaS falló:', error.stack || error.message);
   if (mongoose.connection.readyState === 1 && mongoose.connection.name === databaseName) {
     await mongoose.connection.db.dropDatabase().catch(() => {});
     await mongoose.disconnect().catch(() => {});
