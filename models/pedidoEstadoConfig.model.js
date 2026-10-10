@@ -1,3 +1,4 @@
+const { registerTenantModel } = require('../utils/tenantContext');
 const mongoose = require('mongoose');
 
 const pedidoEstadoConfigSchema = new mongoose.Schema(
@@ -9,4 +10,4 @@ const pedidoEstadoConfigSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-module.exports = mongoose.model('PedidoEstadoConfig', pedidoEstadoConfigSchema);
+module.exports = registerTenantModel('PedidoEstadoConfig', pedidoEstadoConfigSchema);

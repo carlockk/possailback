@@ -1,3 +1,4 @@
+const { registerTenantModel } = require('../utils/tenantContext');
 const mongoose = require('mongoose');
 
 const insumoAlertaConfigSchema = new mongoose.Schema(
@@ -8,4 +9,4 @@ const insumoAlertaConfigSchema = new mongoose.Schema(
   }
 );
 
-module.exports = mongoose.model('InsumoAlertaConfig', insumoAlertaConfigSchema);
+module.exports = registerTenantModel('InsumoAlertaConfig', insumoAlertaConfigSchema);

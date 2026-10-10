@@ -1,5 +1,6 @@
 const cloudinary = require("cloudinary").v2;
 const { Readable } = require("stream");
+const { requireTenantContext } = require('./tenantContext');
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -12,7 +13,7 @@ const subirImagen = (file) => {
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(
       {
-        folder: "productos",
+        folder: `tenants/${requireTenantContext()}/productos`,
         quality: "auto:good",
         fetch_format: "auto",
         transformation: [

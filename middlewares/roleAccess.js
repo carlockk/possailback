@@ -8,10 +8,7 @@ const restringirMesero = (req, res, next) => {
     req.auth = payload;
   }
 
-  const allowLegacyHeaders = process.env.ALLOW_LEGACY_SCOPE_HEADERS === 'true';
-  const rol = payload
-    ? normalizarRol(payload.rol)
-    : (allowLegacyHeaders ? normalizarRol(req.headers['x-user-role']) : '');
+  const rol = payload ? normalizarRol(payload.rol) : '';
 
   if (rol !== 'mesero') {
     return next();

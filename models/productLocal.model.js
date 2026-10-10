@@ -1,3 +1,4 @@
+const { registerTenantModel } = require('../utils/tenantContext');
 const mongoose = require('mongoose');
 
 const varianteLocalSchema = new mongoose.Schema(
@@ -62,4 +63,4 @@ productLocalSchema.virtual('stock_total').get(function () {
   return typeof this.stock === 'number' ? this.stock : null;
 });
 
-module.exports = mongoose.model('ProductoLocal', productLocalSchema);
+module.exports = registerTenantModel('ProductoLocal', productLocalSchema);

@@ -6,12 +6,15 @@ const path = require("path");
 const { restringirMesero } = require("./middlewares/roleAccess");
 const { ensureJwtConfig } = require("./utils/jwtConfig");
 const { bootstrapSuperadmin } = require("./utils/bootstrapSuperadmin");
+const tenantMiddleware = require('./middlewares/tenant');
+const platformRoutes = require('./routes/platform.routes');
 
 // Cargar variables de entorno
 dotenv.config();
 ensureJwtConfig();
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 5000;
 
 // 🛡️ Middleware
@@ -67,6 +70,8 @@ app.use(
   })
 );
 app.use(restringirMesero);
+app.use('/api/plataforma', platformRoutes);
+app.use(tenantMiddleware);
 
 // 🏠 Ruta raíz (para que no salga "Cannot GET /")
 app.get("/", (req, res) => {

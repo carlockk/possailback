@@ -1,3 +1,4 @@
+const { registerTenantModel } = require('../utils/tenantContext');
 const mongoose = require('mongoose');
 
 const ticketSchema = new mongoose.Schema({
@@ -40,4 +41,4 @@ const ticketSchema = new mongoose.Schema({
   }
 });
 
-module.exports = mongoose.model('Ticket', ticketSchema);
+module.exports = registerTenantModel('Ticket', ticketSchema);

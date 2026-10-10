@@ -1,3 +1,4 @@
+const { registerTenantModel } = require('../utils/tenantContext');
 const mongoose = require('mongoose');
 
 const devolucionSchema = new mongoose.Schema({
@@ -14,4 +15,4 @@ const devolucionSchema = new mongoose.Schema({
 devolucionSchema.index({ local: 1, fecha: -1 });
 devolucionSchema.index({ venta: 1, fecha: -1 });
 
-module.exports = mongoose.model('Devolucion', devolucionSchema);
+module.exports = registerTenantModel('Devolucion', devolucionSchema);

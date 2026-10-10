@@ -1,3 +1,4 @@
+const { registerTenantModel } = require('../utils/tenantContext');
 const mongoose = require('mongoose');
 
 const descuentoSchema = new mongoose.Schema({
@@ -13,4 +14,4 @@ const descuentoSchema = new mongoose.Schema({
 
 descuentoSchema.index({ local: 1, nombre: 1 }, { unique: true });
 
-module.exports = mongoose.model('Descuento', descuentoSchema);
+module.exports = registerTenantModel('Descuento', descuentoSchema);

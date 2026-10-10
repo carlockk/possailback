@@ -1,3 +1,4 @@
+const { registerTenantModel } = require('../utils/tenantContext');
 const mongoose = require('mongoose');
 
 const reciboConfigSchema = new mongoose.Schema(
@@ -13,4 +14,4 @@ const reciboConfigSchema = new mongoose.Schema(
   }
 );
 
-module.exports = mongoose.model('ReciboConfig', reciboConfigSchema);
+module.exports = registerTenantModel('ReciboConfig', reciboConfigSchema);

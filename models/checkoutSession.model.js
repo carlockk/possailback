@@ -1,3 +1,4 @@
+const { registerTenantModel } = require('../utils/tenantContext');
 const mongoose = require("mongoose");
 
 const CheckoutSessionSchema = new mongoose.Schema(
@@ -25,4 +26,4 @@ const CheckoutSessionSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-module.exports = mongoose.model("CheckoutSession", CheckoutSessionSchema);
+module.exports = registerTenantModel("CheckoutSession", CheckoutSessionSchema);

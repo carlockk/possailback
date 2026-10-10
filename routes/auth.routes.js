@@ -1,22 +1,22 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
+const mongoose = require('mongoose');
 const Usuario = require('../models/usuario.model.js');
+const Tenant = require('../models/tenant.model.js');
+const { runAsPlatform, runForTenant } = require('../utils/tenantContext');
+const { sanitizeText } = require('../utils/input');
 const { normalizeEmail, isValidEmail } = require('../utils/input');
 const { signUserToken } = require('../utils/authToken');
 
 const router = express.Router();
+router.use((_req, _res, next) => runAsPlatform(next));
 const FAILED_ATTEMPTS_WINDOW_MS = 10 * 60 * 1000;
 const MAX_FAILED_ATTEMPTS = 5;
 const BLOCK_DURATION_MS = 15 * 60 * 1000;
 const loginAttempts = new Map();
+const registerAttempts = new Map();
 
-const getClientIp = (req) => {
-  const forwarded = req.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string' && forwarded.trim()) {
-    return forwarded.split(',')[0].trim();
-  }
-  return req.ip || req.connection?.remoteAddress || 'unknown';
-};
+const getClientIp = (req) => req.ip || req.connection?.remoteAddress || 'unknown';
 
 const getAttemptKey = (req, email) => `${getClientIp(req)}|${email}`;
 
@@ -48,6 +48,65 @@ const registerFailedAttempt = (key) => {
 const clearAttemptState = (key) => {
   loginAttempts.delete(key);
 };
+
+router.post('/register', async (req, res) => {
+  const ip = getClientIp(req);
+  const current = registerAttempts.get(ip);
+  const now = Date.now();
+  if (registerAttempts.size > 1000) {
+    for (const [key, attempt] of registerAttempts) {
+      if (attempt.expiresAt <= now) registerAttempts.delete(key);
+    }
+  }
+  if (current?.expiresAt > now && current.count >= 5) {
+    return res.status(429).json({ error: 'Demasiados registros. Intenta más tarde' });
+  }
+  registerAttempts.set(ip, current?.expiresAt > now
+    ? { count: current.count + 1, expiresAt: current.expiresAt }
+    : { count: 1, expiresAt: now + 60 * 60 * 1000 });
+  const nombre = sanitizeText(req.body?.nombre, { max: 80 });
+  const negocio = sanitizeText(req.body?.negocio, { max: 100 });
+  const email = normalizeEmail(req.body?.email);
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  if (!nombre || !negocio || !isValidEmail(email) || password.length < 12) {
+    return res.status(400).json({ error: 'Completa nombre, negocio, correo y contraseña de al menos 12 caracteres' });
+  }
+
+  let tenant;
+  let usuario;
+  const session = await mongoose.startSession();
+  try {
+    const base = negocio.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 45) || 'negocio';
+    const passwordHash = await bcrypt.hash(password, 12);
+    await session.withTransaction(async () => {
+      if (await Usuario.exists({ email }).session(session)) {
+        const duplicate = new Error('Correo ya registrado');
+        duplicate.code = 11000;
+        throw duplicate;
+      }
+      tenant = new Tenant({ nombre: negocio, slug: `${base}-${require('node:crypto').randomBytes(4).toString('hex')}` });
+      await tenant.save({ session });
+      usuario = new Usuario({
+        nombre, email, password: passwordHash,
+        rol: 'superadmin', tenantId: tenant._id, local: null
+      });
+      await usuario.save({ session });
+      tenant.ownerUser = usuario._id;
+      await tenant.save({ session });
+    });
+    return res.status(201).json({
+      token: signUserToken(usuario),
+      _id: usuario._id, email: usuario.email, nombre: usuario.nombre,
+      rol: usuario.rol, tenantId: tenant._id, negocio: tenant.nombre, local: null
+    });
+  } catch (error) {
+    if (error.code === 11000) return res.status(409).json({ error: 'El correo ya está registrado' });
+    return res.status(500).json({ error: 'No se pudo crear la cuenta' });
+  } finally {
+    await session.endSession();
+  }
+});
 
 /**
  * @swagger
@@ -111,10 +170,7 @@ router.post('/login', async (req, res) => {
     return res.status(429).json({ error: 'Demasiados intentos. Intenta nuevamente en unos minutos.' });
   }
 
-  const usuario = await Usuario.findOne({ email }).populate(
-    'local',
-    'nombre direccion telefono correo'
-  );
+  const usuario = await Usuario.findOne({ email });
   if (!usuario) {
     registerFailedAttempt(attemptKey);
     return res.status(401).json({ error: 'Credenciales invalidas' });
@@ -135,6 +191,21 @@ router.post('/login', async (req, res) => {
     return res.status(401).json({ error: 'Credenciales invalidas' });
   }
 
+  let tenant = null;
+  if (usuario.rol !== 'platform_admin') {
+    if (!usuario.tenantId) {
+      return res.status(403).json({ error: 'La cuenta no tiene un negocio asignado' });
+    }
+    tenant = await Tenant.findById(usuario.tenantId);
+    if (!tenant || tenant.estado !== 'activo') {
+      return res.status(403).json({ error: 'Este negocio no está activo' });
+    }
+    if (usuario.local) {
+      await runForTenant(usuario.tenantId, async () => await usuario.populate('local', 'nombre direccion telefono correo'));
+      if (!usuario.local) return res.status(403).json({ error: 'Local no disponible para este negocio' });
+    }
+  }
+
   clearAttemptState(attemptKey);
   const token = signUserToken(usuario);
 
@@ -144,6 +215,8 @@ router.post('/login', async (req, res) => {
     email: usuario.email,
     nombre: usuario.nombre || '',
     rol: usuario.rol,
+    tenantId: usuario.tenantId || null,
+    negocio: tenant?.nombre || null,
     local: usuario.local
       ? {
           _id: usuario.local._id,

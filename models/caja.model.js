@@ -1,3 +1,4 @@
+const { registerTenantModel } = require('../utils/tenantContext');
 const mongoose = require('mongoose');
 
 const cajaSchema = new mongoose.Schema({
@@ -15,4 +16,4 @@ const cajaSchema = new mongoose.Schema({
   local: { type: mongoose.Schema.Types.ObjectId, ref: 'Local', default: null }
 });
 
-module.exports = mongoose.model('Caja', cajaSchema);
+module.exports = registerTenantModel('Caja', cajaSchema);

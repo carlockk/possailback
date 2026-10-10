@@ -1,3 +1,4 @@
+const { registerTenantModel } = require('../utils/tenantContext');
 const mongoose = require('mongoose');
 
 const categoriaSchema = new mongoose.Schema({
@@ -8,4 +9,4 @@ const categoriaSchema = new mongoose.Schema({
   creada_en: { type: Date, default: Date.now }
 });
 
-module.exports = mongoose.model('Categoria', categoriaSchema);
+module.exports = registerTenantModel('Categoria', categoriaSchema);

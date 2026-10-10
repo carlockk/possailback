@@ -1,3 +1,4 @@
+const { registerTenantModel } = require('../utils/tenantContext');
 const mongoose = require('mongoose');
 
 const localSchema = new mongoose.Schema({
@@ -38,4 +39,4 @@ const localSchema = new mongoose.Schema({
   creado_en: { type: Date, default: Date.now }
 });
 
-module.exports = mongoose.model('Local', localSchema);
+module.exports = registerTenantModel('Local', localSchema);

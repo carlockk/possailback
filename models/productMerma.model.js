@@ -1,3 +1,4 @@
+const { registerTenantModel } = require('../utils/tenantContext');
 const mongoose = require('mongoose');
 
 const productMermaSchema = new mongoose.Schema(
@@ -65,4 +66,4 @@ const productMermaSchema = new mongoose.Schema(
 productMermaSchema.index({ local: 1, creado_en: -1 });
 productMermaSchema.index({ producto: 1, creado_en: -1 });
 
-module.exports = mongoose.model('ProductoMerma', productMermaSchema);
+module.exports = registerTenantModel('ProductoMerma', productMermaSchema);

@@ -2,12 +2,19 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const mongoose = require('mongoose');
 const Local = require('../models/local.model');
+const Tenant = require('../models/tenant.model');
 const Usuario = require('../models/usuario.model.js');
 const { sanitizeText, normalizeEmail, isValidEmail } = require('../utils/input');
 const { adjuntarScopeLocal, requiereLocal } = require('../middlewares/localScope');
 
 const router = express.Router();
 const ROLES_VALIDOS = new Set(['superadmin', 'admin', 'cajero', 'mesero', 'repartidor']);
+const requireAdmin = (req, res, next) => {
+  if (!['superadmin', 'admin'].includes(req.userRole)) {
+    return res.status(403).json({ error: 'No tienes permisos para gestionar usuarios' });
+  }
+  return next();
+};
 
 router.use(adjuntarScopeLocal);
 
@@ -48,7 +55,7 @@ router.use(adjuntarScopeLocal);
  *       500:
  *         description: Error en el servidor
  */
-router.post('/', async (req, res) => {
+router.post('/', requireAdmin, async (req, res) => {
   const nombre = sanitizeText(req.body.nombre, { max: 80 });
   const email = normalizeEmail(req.body.email);
   const password = typeof req.body.password === 'string' ? req.body.password : '';
@@ -61,6 +68,9 @@ router.post('/', async (req, res) => {
   }
   if (!ROLES_VALIDOS.has(rol)) {
     return res.status(400).json({ error: 'Rol inv lido' });
+  }
+  if (rol === 'superadmin' && req.userRole !== 'superadmin') {
+    return res.status(403).json({ error: 'Solo el propietario puede crear otro superadministrador' });
   }
 
   try {
@@ -93,7 +103,7 @@ router.post('/', async (req, res) => {
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
-    const nuevo = new Usuario({ nombre, email, password: hashedPassword, rol, local: esRepartidorGlobal ? null : localId });
+    const nuevo = new Usuario({ nombre, email, password: hashedPassword, rol, tenantId: req.tenantId, local: esRepartidorGlobal ? null : localId });
     await nuevo.save();
 
     res.status(201).json({ mensaje: 'Usuario creado correctamente' });
@@ -116,10 +126,11 @@ router.post('/', async (req, res) => {
  */
 router.get('/', async (req, res) => {
   try {
-    let filtro = {};
+    let filtro = { tenantId: req.tenantId };
     if (req.userRole === 'superadmin') {
       if (req.localId) {
         filtro = {
+          tenantId: req.tenantId,
           $or: [
             { local: req.localId },
             { rol: 'repartidor', local: null }
@@ -130,7 +141,7 @@ router.get('/', async (req, res) => {
       if (!req.localId) {
         return res.status(400).json({ error: 'Local requerido' });
       }
-      filtro = { local: req.localId };
+      filtro = { tenantId: req.tenantId, local: req.localId };
     }
     const usuarios = await Usuario.find(filtro, '-password').populate('local', 'nombre direccion telefono correo');
     res.json(usuarios);
@@ -158,12 +169,19 @@ router.get('/', async (req, res) => {
  *       500:
  *         description: Error al eliminar usuario
  */
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requireAdmin, async (req, res) => {
   try {
-    if (!req.localId) {
+    if (!req.localId && req.userRole !== 'superadmin') {
       return res.status(400).json({ error: 'Local requerido' });
     }
-    await Usuario.findOneAndDelete({ _id: req.params.id, local: req.localId });
+    const tenant = await Tenant.findById(req.tenantId).select('ownerUser').lean();
+    if (String(tenant?.ownerUser) === String(req.params.id)) {
+      return res.status(403).json({ error: 'No se puede eliminar al propietario del negocio' });
+    }
+    const filtro = req.userRole === 'superadmin'
+      ? { _id: req.params.id, tenantId: req.tenantId }
+      : { _id: req.params.id, tenantId: req.tenantId, local: req.localId, rol: { $ne: 'superadmin' } };
+    await Usuario.findOneAndDelete(filtro);
     res.json({ mensaje: 'Usuario eliminado' });
   } catch (err) {
     res.status(500).json({ error: 'Error al eliminar usuario' });
@@ -202,10 +220,17 @@ router.delete('/:id', async (req, res) => {
  *       500:
  *         description: Error al actualizar usuario
  */
-router.put('/:id', async (req, res) => {
+router.put('/:id', requireAdmin, async (req, res) => {
   const { nombre, password, rol } = req.body;
 
   try {
+    const tenant = await Tenant.findById(req.tenantId).select('ownerUser').lean();
+    if (String(tenant?.ownerUser) === String(req.params.id) && (
+      Object.prototype.hasOwnProperty.call(req.body, 'rol') && req.body.rol !== 'superadmin' ||
+      Object.prototype.hasOwnProperty.call(req.body, 'local')
+    )) {
+      return res.status(403).json({ error: 'No se puede quitar el rol de propietario' });
+    }
     const actualizacion = {};
     if (Object.prototype.hasOwnProperty.call(req.body, 'nombre')) {
       const nombreLimpio = sanitizeText(nombre, { max: 80 });
@@ -222,6 +247,9 @@ router.put('/:id', async (req, res) => {
       const rolLimpio = typeof rol === 'string' ? rol.trim() : '';
       if (!ROLES_VALIDOS.has(rolLimpio)) {
         return res.status(400).json({ error: 'Rol inv lido' });
+      }
+      if (rolLimpio === 'superadmin' && req.userRole !== 'superadmin') {
+        return res.status(403).json({ error: 'Solo el propietario puede asignar este rol' });
       }
       actualizacion.rol = rolLimpio;
     }
@@ -256,8 +284,8 @@ router.put('/:id', async (req, res) => {
     }
 
     const filtro = req.userRole === 'superadmin'
-      ? { _id: req.params.id }
-      : { _id: req.params.id, local: req.localId };
+      ? { _id: req.params.id, tenantId: req.tenantId }
+      : { _id: req.params.id, tenantId: req.tenantId, local: req.localId, rol: { $ne: 'superadmin' } };
 
     await Usuario.findOneAndUpdate(filtro, actualizacion);
     res.json({ mensaje: 'Usuario actualizado correctamente' });

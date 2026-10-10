@@ -1,3 +1,4 @@
+const { registerTenantModel } = require('../utils/tenantContext');
 const mongoose = require('mongoose');
 
 const socialEntrySchema = new mongoose.Schema(
@@ -41,4 +42,4 @@ const socialConfigSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-module.exports = mongoose.model('SocialConfig', socialConfigSchema);
+module.exports = registerTenantModel('SocialConfig', socialConfigSchema);

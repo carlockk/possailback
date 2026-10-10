@@ -1,3 +1,4 @@
+const { registerTenantModel } = require('../utils/tenantContext');
 const mongoose = require('mongoose');
 
 const restauranteMesaSchema = new mongoose.Schema(
@@ -51,4 +52,4 @@ const restauranteMesaSchema = new mongoose.Schema(
 
 restauranteMesaSchema.index({ local: 1, numero: 1 }, { unique: true });
 
-module.exports = mongoose.model('RestauranteMesa', restauranteMesaSchema);
+module.exports = registerTenantModel('RestauranteMesa', restauranteMesaSchema);

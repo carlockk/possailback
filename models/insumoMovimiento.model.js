@@ -1,3 +1,4 @@
+const { registerTenantModel } = require('../utils/tenantContext');
 const mongoose = require('mongoose');
 
 const insumoMovimientoSchema = new mongoose.Schema(
@@ -14,4 +15,4 @@ const insumoMovimientoSchema = new mongoose.Schema(
   }
 );
 
-module.exports = mongoose.model('InsumoMovimiento', insumoMovimientoSchema);
+module.exports = registerTenantModel('InsumoMovimiento', insumoMovimientoSchema);

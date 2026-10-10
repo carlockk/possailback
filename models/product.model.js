@@ -1,3 +1,4 @@
+const { registerTenantModel } = require('../utils/tenantContext');
 // models/product.model.js
 const mongoose = require('mongoose');
 
@@ -56,4 +57,4 @@ productSchema.virtual('stock_total').get(function () {
   return typeof this.stock === 'number' ? this.stock : null;
 });
 
-module.exports = mongoose.model('Producto', productSchema);
+module.exports = registerTenantModel('Producto', productSchema);

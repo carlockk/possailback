@@ -1,3 +1,4 @@
+const { registerTenantModel } = require('../utils/tenantContext');
 const mongoose = require("mongoose");
 
 const ProductoSchema = new mongoose.Schema({
@@ -56,4 +57,4 @@ const VentaClienteSchema = new mongoose.Schema({
   fecha_asignacion_repartidor: { type: Date, default: null }
 });
 
-module.exports = mongoose.model("VentaCliente", VentaClienteSchema);
+module.exports = registerTenantModel("VentaCliente", VentaClienteSchema);

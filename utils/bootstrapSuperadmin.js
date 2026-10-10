@@ -1,8 +1,15 @@
 const bcrypt = require('bcryptjs');
 const Usuario = require('../models/usuario.model.js');
+const { runAsPlatform } = require('./tenantContext');
 
-const bootstrapSuperadmin = async ({ force = false } = {}) => {
+const bootstrapSuperadmin = ({ force = false } = {}) => runAsPlatform(async () => {
   if (!force && process.env.BOOTSTRAP_SUPERADMIN !== 'true') return;
+
+  const existente = await Usuario.findOne({ rol: 'platform_admin' }).select('email').lean();
+  if (existente) {
+    console.log(`Ya existe un administrador de plataforma: ${existente.email}`);
+    return;
+  }
 
   const email = String(process.env.SUPERADMIN_EMAIL || '').trim().toLowerCase();
   const password = process.env.SUPERADMIN_PASSWORD || '';
@@ -10,12 +17,6 @@ const bootstrapSuperadmin = async ({ force = false } = {}) => {
 
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || password.length < 12 || !nombre) {
     throw new Error('Configura SUPERADMIN_EMAIL y SUPERADMIN_PASSWORD (minimo 12 caracteres)');
-  }
-
-  const existente = await Usuario.findOne({ rol: 'superadmin' }).select('email').lean();
-  if (existente) {
-    console.log(`Ya existe un superadmin: ${existente.email}`);
-    return;
   }
 
   if (await Usuario.exists({ email })) {
@@ -26,9 +27,9 @@ const bootstrapSuperadmin = async ({ force = false } = {}) => {
     email,
     password: await bcrypt.hash(password, 10),
     nombre,
-    rol: 'superadmin'
+    rol: 'platform_admin'
   });
   console.log(`Superadmin creado: ${email}`);
-};
+});
 
 module.exports = { bootstrapSuperadmin };

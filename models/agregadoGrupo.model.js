@@ -1,3 +1,4 @@
+const { registerTenantModel } = require('../utils/tenantContext');
 const mongoose = require('mongoose');
 
 const agregadoGrupoSchema = new mongoose.Schema({
@@ -14,4 +15,4 @@ const agregadoGrupoSchema = new mongoose.Schema({
 
 agregadoGrupoSchema.index({ local: 1, titulo: 1 }, { unique: true });
 
-module.exports = mongoose.model('AgregadoGrupo', agregadoGrupoSchema);
+module.exports = registerTenantModel('AgregadoGrupo', agregadoGrupoSchema);

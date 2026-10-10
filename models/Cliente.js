@@ -1,9 +1,10 @@
+const { registerTenantModel } = require('../utils/tenantContext');
 // models/Cliente.js
 const mongoose = require('mongoose');
 
 const ClienteSchema = new mongoose.Schema({
   nombre: { type: String, required: true },
-  email: { type: String, required: true, unique: true },
+  email: { type: String, required: true },
   password: { type: String, required: true },
   direccion: { type: String },
   telefono: { type: String },
@@ -11,4 +12,6 @@ const ClienteSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
-module.exports = mongoose.model('Cliente', ClienteSchema);
+ClienteSchema.index({ tenantId: 1, email: 1 }, { unique: true });
+
+module.exports = registerTenantModel('Cliente', ClienteSchema);

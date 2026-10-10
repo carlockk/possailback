@@ -39,10 +39,9 @@ const puedeUsarHeaderLocalSinLocalEnToken = (role) =>
 
 const adjuntarScopeLocal = (req, res, next) => {
   const payload = req.auth || getAuthPayloadFromRequest(req);
-  const allowLegacyHeaders = process.env.ALLOW_LEGACY_SCOPE_HEADERS === 'true';
   const allowPublicCatalog = process.env.ALLOW_PUBLIC_CATALOG !== 'false';
 
-  if (!payload && !allowLegacyHeaders) {
+  if (!payload) {
     if (allowPublicCatalog && esGetCatalogoPublico(req)) {
       const localRaw = req.headers['x-local-id'];
       if (!localRaw || String(localRaw).trim() === '') {
@@ -59,9 +58,7 @@ const adjuntarScopeLocal = (req, res, next) => {
     return res.status(401).json({ error: 'No autenticado' });
   }
 
-  const headerRole = normalizarRol(req.headers['x-user-role']);
   const headerLocalRaw = req.headers['x-local-id'];
-  const headerUserRaw = req.headers['x-user-id'];
 
   req.userRole = '';
   req.localId = null;
@@ -120,23 +117,7 @@ const adjuntarScopeLocal = (req, res, next) => {
     return next();
   }
 
-  req.userRole = headerRole;
-
-  if (headerLocalRaw !== undefined && headerLocalRaw !== null && String(headerLocalRaw).trim() !== '') {
-    if (!mongoose.Types.ObjectId.isValid(headerLocalRaw)) {
-      return res.status(400).json({ error: 'Local invalido' });
-    }
-    req.localId = String(headerLocalRaw);
-  }
-
-  if (headerUserRaw !== undefined && headerUserRaw !== null && String(headerUserRaw).trim() !== '') {
-    if (!mongoose.Types.ObjectId.isValid(headerUserRaw)) {
-      return res.status(400).json({ error: 'Usuario invalido' });
-    }
-    req.userId = String(headerUserRaw);
-  }
-
-  return next();
+  return res.status(401).json({ error: 'No autenticado' });
 };
 
 const requiereLocal = (req, res, next) => {

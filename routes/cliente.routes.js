@@ -90,7 +90,7 @@ router.post('/register', async (req, res) => {
 
     await nuevoCliente.save();
 
-    const token = jwt.sign({ id: nuevoCliente._id, rol: 'cliente' }, JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ id: nuevoCliente._id, rol: 'cliente', tenantId: req.tenantId }, JWT_SECRET, { expiresIn: '7d' });
 
     res.status(201).json({
       msg: 'Registro exitoso.',
@@ -147,7 +147,7 @@ router.post('/login', async (req, res) => {
     const isMatch = await bcrypt.compare(password, cliente.password);
     if (!isMatch) return res.status(400).json({ msg: 'Contraseña incorrecta.' });
 
-    const token = jwt.sign({ id: cliente._id, rol: 'cliente' }, JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ id: cliente._id, rol: 'cliente', tenantId: req.tenantId }, JWT_SECRET, { expiresIn: '7d' });
 
     res.json({
       msg: 'Login exitoso.',

@@ -1,3 +1,4 @@
+const { registerTenantModel } = require('../utils/tenantContext');
 const mongoose = require('mongoose');
 
 const varianteBaseSchema = new mongoose.Schema(
@@ -31,4 +32,4 @@ const productBaseSchema = new mongoose.Schema(
   }
 );
 
-module.exports = mongoose.model('ProductoBase', productBaseSchema);
+module.exports = registerTenantModel('ProductoBase', productBaseSchema);

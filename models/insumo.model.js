@@ -1,3 +1,4 @@
+const { registerTenantModel } = require('../utils/tenantContext');
 const mongoose = require('mongoose');
 
 const observacionSchema = new mongoose.Schema(
@@ -47,4 +48,4 @@ const insumoSchema = new mongoose.Schema(
 
 insumoSchema.index({ local: 1, orden: 1, nombre: 1 });
 
-module.exports = mongoose.model('Insumo', insumoSchema);
+module.exports = registerTenantModel('Insumo', insumoSchema);
