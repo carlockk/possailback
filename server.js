@@ -7,6 +7,7 @@ const { restringirMesero } = require("./middlewares/roleAccess");
 const { ensureJwtConfig } = require("./utils/jwtConfig");
 const { bootstrapSuperadmin } = require("./utils/bootstrapSuperadmin");
 const tenantMiddleware = require('./middlewares/tenant');
+const { requireModule } = require('./middlewares/moduleAccess');
 const platformRoutes = require('./routes/platform.routes');
 
 // Cargar variables de entorno
@@ -125,15 +126,15 @@ app.use("/api/usuarios", usuarioRoutes);
 app.use("/api/categorias", categoriaRoutes);
 app.use("/api/tickets", ticketRoutes);
 app.use("/api/clientes", clienteRoutes);
-app.use("/api/ventasCliente", ventaClienteRoutes);
+app.use("/api/ventasCliente", requireModule('pedidosWeb'), ventaClienteRoutes);
 app.use("/api/pagos", pagosRoutes);
 app.use("/api/insumos", insumoRoutes);
 app.use("/api/insumo-categorias", insumoCategoriaRoutes);
 app.use("/api/locales", localesRoutes);
 app.use("/api/recibo-config", reciboConfigRoutes);
-app.use("/api/agregados", agregadoRoutes);
-app.use("/api/social-config", socialConfigRoutes);
-app.use("/api/restaurante", restauranteRoutes);
+app.use("/api/agregados", requireModule('agregados'), agregadoRoutes);
+app.use("/api/social-config", requireModule('pedidosWeb'), socialConfigRoutes);
+app.use("/api/restaurante", requireModule('restaurante'), restauranteRoutes);
 app.use("/api/descuentos", descuentoRoutes);
 
 // 🔌 Levantar servidor primero para evitar timeout en Render

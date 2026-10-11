@@ -7,6 +7,7 @@ const Caja = require('../models/caja.model.js');
 const Devolucion = require('../models/devolucion.model.js');
 const Descuento = require('../models/descuento.model.js');
 const { sanitizeText, sanitizeOptionalText } = require('../utils/input');
+const { crearAcumuladorVentas } = require('../utils/ventaResumen');
 const { adjuntarScopeLocal, requiereLocal } = require('../middlewares/localScope');
 const { requiereRol } = require('../middlewares/roles');
 
@@ -113,22 +114,6 @@ const snapshotDescuento = (descuento, monto) => descuento ? ({
   manual: Boolean(descuento.manual) || !(descuento.descuentoId || descuento._id)
 }) : null;
 
-const obtenerPagosAplicados = (venta) => {
-  if (Array.isArray(venta.pagos) && venta.pagos.length > 0) {
-    return venta.pagos
-      .map((pago) => ({
-        tipo: pago?.tipo || 'Otro',
-        monto: Number(pago?.monto) || 0
-      }))
-      .filter((pago) => pago.monto > 0);
-  }
-
-  return [{
-    tipo: venta.tipo_pago || 'Otro',
-    monto: Number(venta.total) || 0
-  }];
-};
-
 const calcularStockDesdeVariantes = (variantes = []) => {
   const stocks = variantes
     .map((variante) => {
@@ -140,118 +125,38 @@ const calcularStockDesdeVariantes = (variantes = []) => {
   return stocks.reduce((acc, stock) => acc + stock, 0);
 };
 
-const toPlainVenta = (venta) => {
-  if (!venta) return {};
-  return typeof venta.toObject === 'function' ? venta.toObject() : venta;
-};
+const calcularResumenVentas = async (filtro, filtroWeb, localId) => {
+  const acumulador = crearAcumuladorVentas();
+  const procesar = async (modelo, condiciones, canal) => {
+    const cursor = modelo.find(condiciones)
+      .select('productos total tipo_pago pagos')
+      .lean()
+      .cursor({ batchSize: 200 });
+    for await (const venta of cursor) acumulador.agregar(venta, canal);
+  };
 
-const consolidarVentas = (ventasPos = [], ventasWeb = []) => ([
-  ...ventasPos.map((venta) => ({ ...toPlainVenta(venta), canal: 'POS' })),
-  ...ventasWeb.map((venta) => ({ ...toPlainVenta(venta), canal: 'WEB' }))
-]);
+  await procesar(Venta, filtro, 'POS');
+  await procesar(VentaCliente, filtroWeb, 'WEB');
 
-const armarDesglosePorTipoProducto = async (ventas = [], localId) => {
-  const ids = new Set();
-  ventas.forEach((venta) => {
-    venta.productos?.forEach((item) => {
-      if (item?.productoId) {
-        ids.add(item.productoId.toString());
-      }
-    });
-  });
-
-  if (ids.size === 0) {
-    return {};
-  }
-
-  const idsArray = [...ids];
-  const productosLocal = await ProductoLocal.find({
-    _id: { $in: idsArray },
-    local: localId
-  })
-    .select('productoBase')
-    .populate({
-      path: 'productoBase',
-      select: 'categoria',
-      populate: { path: 'categoria', select: 'nombre' }
-    })
-    .lean();
-
+  const ids = acumulador.obtenerProductoIds();
   const categoriaPorProducto = new Map();
-  productosLocal.forEach((producto) => {
-    const categoriaNombre = producto.productoBase?.categoria?.nombre || 'Sin categoria';
-    categoriaPorProducto.set(producto._id.toString(), categoriaNombre);
-  });
-
-  const porTipoProducto = {};
-  ventas.forEach((venta) => {
-    venta.productos?.forEach((item) => {
-      const productoId = item?.productoId ? item.productoId.toString() : null;
-      const categoria = productoId && categoriaPorProducto.get(productoId)
-        ? categoriaPorProducto.get(productoId)
-        : 'Sin categoria';
-      const precio = Number(item?.precio_unitario) || 0;
-      const cantidad = Number(item?.cantidad) || 0;
-      const subtotal = precio * cantidad;
-
-      if (subtotal <= 0) return;
-      porTipoProducto[categoria] = (porTipoProducto[categoria] || 0) + subtotal;
+  if (ids.length > 0) {
+    const productosLocal = await ProductoLocal.find({ _id: { $in: ids }, local: localId })
+      .select('productoBase')
+      .populate({
+        path: 'productoBase',
+        select: 'categoria',
+        populate: { path: 'categoria', select: 'nombre' }
+      })
+      .lean();
+    productosLocal.forEach((producto) => {
+      categoriaPorProducto.set(
+        producto._id.toString(),
+        producto.productoBase?.categoria?.nombre || 'Sin categoria'
+      );
     });
-  });
-
-  return porTipoProducto;
-};
-
-const armarResumenPorProducto = (ventas = []) => {
-  const porProducto = new Map();
-
-  ventas.forEach((venta) => {
-    venta.productos?.forEach((item) => {
-      const nombreBase = item?.nombre || 'Producto sin nombre';
-      const atributos = Array.isArray(item?.atributos) ? item.atributos : [];
-      const detalleAtributos = atributos
-        .map((atributo) => {
-          const nombre = sanitizeOptionalText(atributo?.nombre, { max: 30 }) || '';
-          const valor = sanitizeOptionalText(atributo?.valor, { max: 60 }) || '';
-          if (!nombre || !valor) return null;
-          return `${nombre}: ${valor}`;
-        })
-        .filter(Boolean);
-      const varianteNombre = sanitizeOptionalText(item?.varianteNombre, { max: 80 }) || '';
-      const detalle = detalleAtributos.length > 0
-        ? detalleAtributos.join(' | ')
-        : varianteNombre;
-      const nombre = detalle ? `${nombreBase} (${detalle})` : nombreBase;
-      const cantidad = Number(item?.cantidad) || 0;
-      const precio = Number(item?.precio_unitario) || 0;
-      if (cantidad <= 0 || precio < 0) return;
-
-      const actual = porProducto.get(nombre) || { nombre, cantidad: 0, total: 0 };
-      actual.cantidad += cantidad;
-      actual.total += cantidad * precio;
-      porProducto.set(nombre, actual);
-    });
-  });
-
-  return [...porProducto.values()].sort((a, b) => b.total - a.total);
-};
-
-const armarDesglosePorTipoPago = (ventas = []) => {
-  const porTipoPago = {};
-  const porTipoPagoDetallado = { POS: {}, WEB: {} };
-
-  ventas.forEach((venta) => {
-    const canal = venta.canal === 'WEB' ? 'WEB' : 'POS';
-
-    obtenerPagosAplicados(venta).forEach((pago) => {
-      const llaveConCanal = `${pago.tipo} (${canal})`;
-      porTipoPago[llaveConCanal] = (porTipoPago[llaveConCanal] || 0) + pago.monto;
-      porTipoPagoDetallado[canal][pago.tipo] =
-        (porTipoPagoDetallado[canal][pago.tipo] || 0) + pago.monto;
-    });
-  });
-
-  return { porTipoPago, porTipoPagoDetallado };
+  }
+  return acumulador.finalizar(categoriaPorProducto);
 };
 
 /**
@@ -638,39 +543,7 @@ router.get('/resumen', async (req, res) => {
       estado_pedido: /^entregado$/i
     };
 
-    const [ventasPos, ventasWeb] = await Promise.all([
-      Venta.find(filtro)
-        .select('productos total tipo_pago pagos fecha numero_pedido')
-        .lean(),
-      VentaCliente.find(filtroWeb)
-        .select('productos total tipo_pago pagos fecha numero_pedido estado_pedido')
-        .lean()
-    ]);
-    const ventasConsolidadas = consolidarVentas(ventasPos, ventasWeb);
-
-    const totalPos = ventasPos.reduce((acc, v) => acc + (Number(v.total) || 0), 0);
-    const totalWeb = ventasWeb.reduce((acc, v) => acc + (Number(v.total) || 0), 0);
-    const total = totalPos + totalWeb;
-    const cantidadPos = ventasPos.length;
-    const cantidadWeb = ventasWeb.length;
-    const cantidad = cantidadPos + cantidadWeb;
-
-    const { porTipoPago, porTipoPagoDetallado } = armarDesglosePorTipoPago(ventasConsolidadas);
-    const porTipoProducto = await armarDesglosePorTipoProducto(ventasConsolidadas, req.localId);
-    const porProducto = armarResumenPorProducto(ventasConsolidadas);
-
-    res.json({
-      total,
-      cantidad,
-      porTipoPago,
-      porTipoPagoDetallado,
-      porTipoProducto,
-      porProducto,
-      totalesPorCanal: {
-        POS: { total: totalPos, cantidad: cantidadPos },
-        WEB: { total: totalWeb, cantidad: cantidadWeb }
-      }
-    });
+    res.json(await calcularResumenVentas(filtro, filtroWeb, req.localId));
   } catch (err) {
     console.error('Error al obtener resumen:', err);
     res.status(500).json({ error: 'Error interno del servidor' });
@@ -733,39 +606,7 @@ router.get('/resumen-rango', async (req, res) => {
       estado_pedido: /^entregado$/i
     };
 
-    const [ventasPos, ventasWeb] = await Promise.all([
-      Venta.find(filtro)
-        .select('productos total tipo_pago pagos fecha numero_pedido')
-        .lean(),
-      VentaCliente.find(filtroWeb)
-        .select('productos total tipo_pago pagos fecha numero_pedido estado_pedido')
-        .lean()
-    ]);
-    const ventasConsolidadas = consolidarVentas(ventasPos, ventasWeb);
-
-    const totalPos = ventasPos.reduce((acc, v) => acc + (Number(v.total) || 0), 0);
-    const totalWeb = ventasWeb.reduce((acc, v) => acc + (Number(v.total) || 0), 0);
-    const total = totalPos + totalWeb;
-    const cantidadPos = ventasPos.length;
-    const cantidadWeb = ventasWeb.length;
-    const cantidad = cantidadPos + cantidadWeb;
-
-    const { porTipoPago, porTipoPagoDetallado } = armarDesglosePorTipoPago(ventasConsolidadas);
-    const porTipoProducto = await armarDesglosePorTipoProducto(ventasConsolidadas, req.localId);
-    const porProducto = armarResumenPorProducto(ventasConsolidadas);
-
-    res.json({
-      total,
-      cantidad,
-      porTipoPago,
-      porTipoPagoDetallado,
-      porTipoProducto,
-      porProducto,
-      totalesPorCanal: {
-        POS: { total: totalPos, cantidad: cantidadPos },
-        WEB: { total: totalWeb, cantidad: cantidadWeb }
-      }
-    });
+    res.json(await calcularResumenVentas(filtro, filtroWeb, req.localId));
   } catch (err) {
     console.error('Error al obtener resumen por rango:', err);
     res.status(500).json({ error: 'Error interno del servidor' });
@@ -820,6 +661,11 @@ router.post('/', async (req, res) => {
     if (!Array.isArray(productos) || productos.length === 0) {
       const error = new Error('La venta debe incluir al menos un producto.');
       error.status = 400;
+      throw error;
+    }
+    if (!req.modulos?.agregados && productos.some((item) => Array.isArray(item.agregados) && item.agregados.length > 0)) {
+      const error = new Error('El modulo Agregados esta desactivado. Quita los agregados del carrito.');
+      error.status = 403;
       throw error;
     }
 

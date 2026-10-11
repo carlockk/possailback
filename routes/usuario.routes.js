@@ -70,6 +70,12 @@ router.post('/', requireAdmin, async (req, res) => {
   if (!ROLES_VALIDOS.has(rol)) {
     return res.status(400).json({ error: 'Rol inv lido' });
   }
+  if (rol === 'mesero' && !req.modulos?.restaurante) {
+    return res.status(403).json({ error: 'Activa Restaurante para crear meseros' });
+  }
+  if (rol === 'repartidor' && !req.modulos?.pedidosWeb) {
+    return res.status(403).json({ error: 'Activa Pedidos Web para crear repartidores' });
+  }
   if (rol === 'superadmin' && req.userRole !== 'superadmin') {
     return res.status(403).json({ error: 'Solo el propietario puede crear otro superadministrador' });
   }
@@ -249,6 +255,13 @@ router.put('/:id', requireAdmin, async (req, res) => {
       const rolLimpio = typeof rol === 'string' ? rol.trim() : '';
       if (!ROLES_VALIDOS.has(rolLimpio)) {
         return res.status(400).json({ error: 'Rol inv lido' });
+      }
+      const rolActual = await Usuario.findById(req.params.id).select('rol').lean();
+      if (rolLimpio === 'mesero' && !req.modulos?.restaurante && rolActual?.rol !== 'mesero') {
+        return res.status(403).json({ error: 'Activa Restaurante para asignar el rol mesero' });
+      }
+      if (rolLimpio === 'repartidor' && !req.modulos?.pedidosWeb && rolActual?.rol !== 'repartidor') {
+        return res.status(403).json({ error: 'Activa Pedidos Web para asignar el rol repartidor' });
       }
       if (rolLimpio === 'superadmin' && req.userRole !== 'superadmin') {
         return res.status(403).json({ error: 'Solo el propietario puede asignar este rol' });

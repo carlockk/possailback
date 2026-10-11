@@ -647,10 +647,12 @@ router.get('/', async (_req, res) => {
       .sort({ creado_en: -1 })
       .lean({ virtuals: true });
 
-    const agregadosPorProducto = await combinarAgregadosPorReglas(_req.localId, locales);
+    const agregadosPorProducto = _req.modulos?.agregados
+      ? await combinarAgregadosPorReglas(_req.localId, locales)
+      : new Map();
 
     const catalogo = locales.map((prod) =>
-      proyectarProductoLocal(prod, agregadosPorProducto.get(String(prod._id)) || null)
+      proyectarProductoLocal(prod, _req.modulos?.agregados ? (agregadosPorProducto.get(String(prod._id)) || null) : [])
     );
     const body = JSON.stringify(catalogo);
     res.vary('Accept-Encoding');
@@ -702,11 +704,13 @@ router.get('/:id', async (req, res) => {
     })
       .lean({ virtuals: true });
     if (productoLocal) {
-      const agregadosPorProducto = await combinarAgregadosPorReglas(req.localId, [productoLocal]);
+      const agregadosPorProducto = req.modulos?.agregados
+        ? await combinarAgregadosPorReglas(req.localId, [productoLocal])
+        : new Map();
       return res.json(
         proyectarProductoLocal(
           productoLocal,
-          agregadosPorProducto.get(String(productoLocal._id)) || null
+          req.modulos?.agregados ? (agregadosPorProducto.get(String(productoLocal._id)) || null) : []
         )
       );
     }
@@ -756,6 +760,9 @@ router.post('/', upload.single('imagen'), async (req, res) => {
     const stockBase = parseStockValue(req.body.stock, controlarStock);
     const variantesRaw = normalizarVariantes(req.body.variantes);
     const agregadosRaw = parseObjectIdArray(req.body.agregados);
+    if (!req.modulos?.agregados && agregadosRaw.length) {
+      return res.status(403).json({ error: 'El modulo Agregados esta desactivado' });
+    }
     const stockCalculado = calcularStockTotal(variantesRaw, stockBase);
 
     const categoriaId = normalizeCategoriaId(req.body.categoria);
@@ -769,7 +776,7 @@ router.post('/', upload.single('imagen'), async (req, res) => {
         { local: req.localId, activo: true, _id: { $in: agregadosRaw } },
         '_id'
       ).lean();
-    } else if (categoriaId) {
+    } else if (categoriaId && req.modulos?.agregados) {
       agregadosValidos = await Agregado.find(
         { local: req.localId, activo: true, categorias: categoriaId },
         '_id'
@@ -855,6 +862,9 @@ router.put('/:id', upload.single('imagen'), async (req, res) => {
       const stockBase = parseStockValue(req.body.stock, controlarStock);
       const variantesRaw = normalizarVariantes(req.body.variantes);
       const agregadosRaw = parseObjectIdArray(req.body.agregados);
+      if (!req.modulos?.agregados && agregadosRaw.length) {
+        return res.status(403).json({ error: 'El modulo Agregados esta desactivado' });
+      }
       const baseActuales = Array.isArray(baseEditable?.variantes)
         ? baseEditable.variantes
         : [];
@@ -973,7 +983,7 @@ router.put('/:id', upload.single('imagen'), async (req, res) => {
           { local: req.localId, activo: true, _id: { $in: agregadosRaw } },
           '_id'
         ).lean();
-      } else if (categoriaId) {
+      } else if (categoriaId && req.modulos?.agregados) {
         agregadosValidos = await Agregado.find(
           { local: req.localId, activo: true, categorias: categoriaId },
           '_id'
@@ -992,7 +1002,7 @@ router.put('/:id', upload.single('imagen'), async (req, res) => {
 
       productoLocal.precio = precio;
       productoLocal.stock = stockCalculado;
-      productoLocal.agregados = agregadosValidos.map((a) => a._id);
+      if (req.modulos?.agregados) productoLocal.agregados = agregadosValidos.map((a) => a._id);
       productoLocal.variantes = variantes;
 
       const actualizado = await productoLocal.save();

@@ -11,6 +11,10 @@ const { getAuthPayloadFromRequest } = require('../utils/authToken');
 const { authRateLimit } = require('../utils/authRateLimit');
 const { validPassword } = require('../utils/passwordPolicy');
 const deleteTenantData = require('../utils/deleteTenantData');
+const RestauranteComanda = require('../models/restauranteComanda.model');
+const VentaCliente = require('../models/ventaCliente.model');
+const CheckoutSession = require('../models/checkoutSession.model');
+const { getModules, parseModules } = require('../utils/modules');
 
 const router = express.Router();
 router.use((_req, _res, next) => runAsPlatform(next));
@@ -19,6 +23,10 @@ router.post('/register', authRateLimit({ scope: 'tenant-register', ipLimit: 5, w
   const negocio = sanitizeText(req.body?.negocio, { max: 100 });
   const email = normalizeEmail(req.body?.email);
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  const modulos = req.body?.modulos === undefined
+    ? { agregados: false, restaurante: false, pedidosWeb: false }
+    : parseModules(req.body.modulos);
+  if (!modulos) return res.status(400).json({ error: 'Seleccion de modulos invalida' });
   if (!nombre || !negocio || !isValidEmail(email) || !validPassword(password)) {
     return res.status(400).json({ error: 'Completa nombre, negocio, correo y contraseña de 12 a 72 bytes' });
   }
@@ -36,7 +44,11 @@ router.post('/register', authRateLimit({ scope: 'tenant-register', ipLimit: 5, w
         duplicate.code = 11000;
         throw duplicate;
       }
-      tenant = new Tenant({ nombre: negocio, slug: `${base}-${require('node:crypto').randomBytes(4).toString('hex')}` });
+      tenant = new Tenant({
+        nombre: negocio,
+        slug: `${base}-${require('node:crypto').randomBytes(4).toString('hex')}`,
+        modulos
+      });
       await tenant.save({ session });
       usuario = new Usuario({
         nombre, email, password: passwordHash,
@@ -49,7 +61,8 @@ router.post('/register', authRateLimit({ scope: 'tenant-register', ipLimit: 5, w
     return res.status(201).json({
       token: signUserToken(usuario),
       _id: usuario._id, email: usuario.email, nombre: usuario.nombre,
-      rol: usuario.rol, tenantId: tenant._id, negocio: tenant.nombre, local: null
+      rol: usuario.rol, tenantId: tenant._id, negocio: tenant.nombre, local: null,
+      modulos: getModules(tenant)
     });
   } catch (error) {
     if (error.code === 11000) return res.status(409).json({ error: 'El correo ya está registrado' });
@@ -138,6 +151,13 @@ router.post('/login', authRateLimit({
     if (!tenant || tenant.estado !== 'activo') {
       return res.status(403).json({ error: 'Este negocio no está activo' });
     }
+    const modulosActivos = getModules(tenant);
+    if (usuario.rol === 'mesero' && !modulosActivos.restaurante) {
+      return res.status(403).json({ error: 'Restaurante no está habilitado para este negocio' });
+    }
+    if (usuario.rol === 'repartidor' && !modulosActivos.pedidosWeb) {
+      return res.status(403).json({ error: 'Pedidos Web no está habilitado para este negocio' });
+    }
     if (usuario.local) {
       await runForTenant(usuario.tenantId, async () => await usuario.populate('local', 'nombre direccion telefono correo'));
       if (!usuario.local) return res.status(403).json({ error: 'Local no disponible para este negocio' });
@@ -154,6 +174,7 @@ router.post('/login', authRateLimit({
     rol: usuario.rol,
     tenantId: usuario.tenantId || null,
     negocio: tenant?.nombre || null,
+    modulos: tenant ? getModules(tenant) : null,
     local: usuario.local
       ? {
           _id: usuario.local._id,
@@ -164,6 +185,69 @@ router.post('/login', authRateLimit({
         }
       : null
   });
+});
+
+const getTenantSession = async (req) => {
+  const payload = getAuthPayloadFromRequest(req);
+  if (!payload || payload.rol === 'cliente' || payload.rol === 'platform_admin' ||
+      !mongoose.Types.ObjectId.isValid(payload.tenantId)) return null;
+  const user = await Usuario.findOne({
+    _id: payload.id,
+    tenantId: payload.tenantId,
+    rol: payload.rol,
+    tokenVersion: payload.ver || 0
+  }).select('rol tenantId');
+  if (!user) return null;
+  const tenant = await Tenant.findById(payload.tenantId);
+  if (!tenant || tenant.estado !== 'activo') return null;
+  return { user, tenant };
+};
+
+router.get('/modulos', async (req, res) => {
+  try {
+    const session = await getTenantSession(req);
+    if (!session) return res.status(401).json({ error: 'Sesion invalida' });
+    return res.json({ modulos: getModules(session.tenant) });
+  } catch {
+    return res.status(500).json({ error: 'No se pudieron cargar los modulos' });
+  }
+});
+
+router.put('/modulos', async (req, res) => {
+  const modulos = parseModules(req.body?.modulos);
+  if (!modulos) return res.status(400).json({ error: 'Seleccion de modulos invalida' });
+  try {
+    const session = await getTenantSession(req);
+    if (!session) return res.status(401).json({ error: 'Sesion invalida' });
+    const { user, tenant } = session;
+    if (user.rol !== 'superadmin' || String(tenant.ownerUser) !== String(user._id)) {
+      return res.status(403).json({ error: 'Solo el propietario puede cambiar los modulos' });
+    }
+
+    const actuales = getModules(tenant);
+    if (actuales.restaurante && !modulos.restaurante) {
+      const abierta = await runForTenant(tenant._id, () => RestauranteComanda.exists({
+        estado: { $nin: ['cerrada', 'cancelada'] }
+      }));
+      if (abierta) return res.status(409).json({ error: 'Cierra las comandas pendientes antes de desactivar Restaurante' });
+    }
+    if (actuales.pedidosWeb && !modulos.pedidosWeb) {
+      const pagoPendiente = await runForTenant(tenant._id, () => CheckoutSession.exists({
+        estado: 'pendiente_pago', createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+      }));
+      if (pagoPendiente) return res.status(409).json({ error: 'Hay pagos web pendientes. Resuélvelos antes de desactivar Pedidos Web' });
+      const abierto = await runForTenant(tenant._id, () => VentaCliente.exists({
+        estado_pedido: { $nin: [/^entregado$/i, /^rechazado$/i, /^cancelado$/i] }
+      }));
+      if (abierto) return res.status(409).json({ error: 'Resuelve los pedidos pendientes antes de desactivar Pedidos Web' });
+    }
+
+    tenant.modulos = modulos;
+    await tenant.save();
+    return res.json({ modulos: getModules(tenant) });
+  } catch {
+    return res.status(500).json({ error: 'No se pudieron guardar los modulos' });
+  }
 });
 
 router.post('/password', authRateLimit({ scope: 'password-change', ipLimit: 10, windowMs: 60 * 60 * 1000 }), async (req, res) => {

@@ -372,6 +372,9 @@ router.get("/local/pedidos", adjuntarScopeLocal, requiereLocal, async (req, res)
     }
 
     const filtro = { local: req.localId };
+    if (String(req.query?.abiertos || '').toLowerCase() === 'true') {
+      filtro.estado_pedido = { $nin: [/^entregado$/i, /^rechazado$/i, /^cancelado$/i] };
+    }
     const estado = sanitizeOptionalText(req.query?.estado, { max: 30 }) || "";
     const tipoPedido = normalizarTipoPedido(req.query?.tipo_pedido);
     const soloDomicilio = String(req.query?.solo_domicilio || "").toLowerCase() === "true";

@@ -260,6 +260,9 @@ router.all("/retorno-webpay", async (req, res) => {
 });
 
 router.post("/crear-sesion", async (req, res) => {
+  if (!req.modulos?.pedidosWeb) {
+    return res.status(403).json({ error: 'Pedidos Web no esta habilitado para este negocio' });
+  }
   try {
     const order = req.body?.order || {};
     const items = normalizarItems(order.items);

@@ -7,6 +7,7 @@ const VentaCliente = require('../models/ventaCliente.model');
 const Cliente = require('../models/Cliente');
 const { getAuthPayloadFromRequest } = require('../utils/authToken');
 const { runForTenant, runAsPlatform } = require('../utils/tenantContext');
+const { getModules } = require('../utils/modules');
 
 const publicLocalId = (req) => {
   const path = req.path;
@@ -94,7 +95,7 @@ const tenantMiddleware = async (req, res, next) => {
       if (!tenantId) return res.status(401).json({ error: 'Negocio o sesion requerido' });
     }
 
-    const tenant = await Tenant.findById(tenantId).select('estado').lean();
+    const tenant = await Tenant.findById(tenantId).select('estado modulos').lean();
     if (!tenant || tenant.estado !== 'activo') {
       return res.status(403).json({ error: 'Este negocio no esta activo' });
     }
@@ -109,6 +110,7 @@ const tenantMiddleware = async (req, res, next) => {
       }
     }
     req.tenantId = String(tenantId);
+    req.modulos = getModules(tenant);
     return runForTenant(tenantId, next);
   } catch (error) {
     return res.status(500).json({ error: 'No se pudo validar el negocio' });

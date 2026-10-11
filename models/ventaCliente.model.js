@@ -57,4 +57,6 @@ const VentaClienteSchema = new mongoose.Schema({
   fecha_asignacion_repartidor: { type: Date, default: null }
 });
 
+VentaClienteSchema.index({ local: 1, fecha: -1 });
+
 module.exports = registerTenantModel("VentaCliente", VentaClienteSchema);

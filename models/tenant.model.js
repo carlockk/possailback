@@ -7,6 +7,11 @@ const tenantSchema = new mongoose.Schema({
   estado: { type: String, enum: ['activo', 'suspendido'], default: 'activo' },
   plan: { type: String, default: 'gratis' },
   billingStatus: { type: String, default: 'no_configurado' },
+  modulos: {
+    agregados: { type: Boolean, default: true },
+    restaurante: { type: Boolean, default: true },
+    pedidosWeb: { type: Boolean, default: true },
+  },
 }, { timestamps: true });
 
 module.exports = mongoose.model('Tenant', tenantSchema);

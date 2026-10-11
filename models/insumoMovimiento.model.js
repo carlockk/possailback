@@ -15,4 +15,6 @@ const insumoMovimientoSchema = new mongoose.Schema(
   }
 );
 
+insumoMovimientoSchema.index({ local: 1, fecha: -1 });
+
 module.exports = registerTenantModel('InsumoMovimiento', insumoMovimientoSchema);
