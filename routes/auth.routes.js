@@ -194,10 +194,9 @@ const getTenantSession = async (req) => {
   const user = await Usuario.findOne({
     _id: payload.id,
     tenantId: payload.tenantId,
-    rol: payload.rol,
-    tokenVersion: payload.ver || 0
-  }).select('rol tenantId');
-  if (!user) return null;
+    rol: payload.rol
+  }).select('rol tenantId tokenVersion');
+  if (!user || Number(user.tokenVersion || 0) !== Number(payload.ver || 0)) return null;
   const tenant = await Tenant.findById(payload.tenantId);
   if (!tenant || tenant.estado !== 'activo') return null;
   return { user, tenant };
