@@ -32,10 +32,12 @@ router.post('/register', authRateLimit({ scope: 'tenant-register', ipLimit: 5, w
   const negocio = sanitizeText(req.body?.negocio, { max: 100 });
   const email = normalizeEmail(req.body?.email);
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  const plan = req.body?.plan === undefined ? 'inicio' : req.body.plan;
   const modulos = req.body?.modulos === undefined
     ? { agregados: false, restaurante: false, pedidosWeb: false }
     : parseModules(req.body.modulos);
   if (!modulos) return res.status(400).json({ error: 'Seleccion de modulos invalida' });
+  if (!['inicio', 'pro'].includes(plan)) return res.status(400).json({ error: 'Plan invalido' });
   if (!nombre || !negocio || !isValidEmail(email) || !validPassword(password)) {
     return res.status(400).json({ error: 'Completa nombre, negocio, correo y contraseña de 12 a 72 bytes' });
   }
@@ -56,7 +58,7 @@ router.post('/register', authRateLimit({ scope: 'tenant-register', ipLimit: 5, w
       tenant = new Tenant({
         nombre: negocio,
         slug: `${base}-${require('node:crypto').randomBytes(4).toString('hex')}`,
-        plan: 'inicio',
+        plan,
         modulos
       });
       await tenant.save({ session });
