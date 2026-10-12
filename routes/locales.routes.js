@@ -3,6 +3,7 @@ const Local = require('../models/local.model');
 const { sanitizeText, sanitizeOptionalText, normalizeEmail, isValidEmail } = require('../utils/input');
 const { adjuntarScopeLocal } = require('../middlewares/localScope');
 const { normalizeDeliveryZones } = require('../utils/deliveryZones');
+const { requireCapacity } = require('../middlewares/planCapacity');
 
 const router = express.Router();
 
@@ -79,7 +80,7 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-router.post('/', adjuntarScopeLocal, requireAdmin, async (req, res) => {
+router.post('/', adjuntarScopeLocal, requireAdmin, requireCapacity('local'), async (req, res) => {
   try {
     const payload = construirPayload(req.body);
     if (!payload.nombre) {

@@ -15,9 +15,18 @@ const RestauranteComanda = require('../models/restauranteComanda.model');
 const VentaCliente = require('../models/ventaCliente.model');
 const CheckoutSession = require('../models/checkoutSession.model');
 const { getModules, parseModules } = require('../utils/modules');
+const Local = require('../models/local.model');
+const { STAFF_ROLES, getPlanConfig, getPlanLimits } = require('../utils/planLimits');
 
 const router = express.Router();
 router.use((_req, _res, next) => runAsPlatform(next));
+router.get('/planes', async (_req, res) => {
+  try {
+    return res.json(await getPlanConfig());
+  } catch {
+    return res.status(500).json({ error: 'No se pudieron cargar los planes' });
+  }
+});
 router.post('/register', authRateLimit({ scope: 'tenant-register', ipLimit: 5, windowMs: 60 * 60 * 1000 }), async (req, res) => {
   const nombre = sanitizeText(req.body?.nombre, { max: 80 });
   const negocio = sanitizeText(req.body?.negocio, { max: 100 });
@@ -47,6 +56,7 @@ router.post('/register', authRateLimit({ scope: 'tenant-register', ipLimit: 5, w
       tenant = new Tenant({
         nombre: negocio,
         slug: `${base}-${require('node:crypto').randomBytes(4).toString('hex')}`,
+        plan: 'inicio',
         modulos
       });
       await tenant.save({ session });
@@ -209,6 +219,24 @@ router.get('/modulos', async (req, res) => {
     return res.json({ modulos: getModules(session.tenant) });
   } catch {
     return res.status(500).json({ error: 'No se pudieron cargar los modulos' });
+  }
+});
+
+router.get('/plan', async (req, res) => {
+  try {
+    const session = await getTenantSession(req);
+    if (!session) return res.status(401).json({ error: 'Sesion invalida' });
+    const config = await getPlanConfig();
+    const [usuarios, locales, counts] = await Promise.all([
+      Usuario.countDocuments({ tenantId: session.tenant._id }),
+      Local.countDocuments({ tenantId: session.tenant._id }),
+      Promise.all(STAFF_ROLES.map((rol) => Usuario.countDocuments({ tenantId: session.tenant._id, rol }))),
+    ]);
+    const usuariosPorRol = Object.fromEntries(STAFF_ROLES.map((rol, index) => [rol, counts[index]]));
+    return res.json({ ...getPlanLimits(session.tenant, config), usuarios, usuariosPorRol, locales,
+      precioUsuarioExtra: config.precioUsuarioExtra, billingStatus: session.tenant.billingStatus });
+  } catch {
+    return res.status(500).json({ error: 'No se pudo cargar el plan' });
   }
 });
 

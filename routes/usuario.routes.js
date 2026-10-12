@@ -7,6 +7,8 @@ const Usuario = require('../models/usuario.model.js');
 const { sanitizeText, normalizeEmail, isValidEmail } = require('../utils/input');
 const { validPassword } = require('../utils/passwordPolicy');
 const { adjuntarScopeLocal, requiereLocal } = require('../middlewares/localScope');
+const { requireCapacity } = require('../middlewares/planCapacity');
+const { getPlanConfig, getPlanLimits } = require('../utils/planLimits');
 
 const router = express.Router();
 const ROLES_VALIDOS = new Set(['superadmin', 'admin', 'cajero', 'mesero', 'repartidor']);
@@ -56,7 +58,7 @@ router.use(adjuntarScopeLocal);
  *       500:
  *         description: Error en el servidor
  */
-router.post('/', requireAdmin, async (req, res) => {
+router.post('/', requireAdmin, requireCapacity('usuario'), async (req, res) => {
   const nombre = sanitizeText(req.body.nombre, { max: 80 });
   const email = normalizeEmail(req.body.email);
   const password = typeof req.body.password === 'string' ? req.body.password : '';
@@ -76,9 +78,7 @@ router.post('/', requireAdmin, async (req, res) => {
   if (rol === 'repartidor' && !req.modulos?.pedidosWeb) {
     return res.status(403).json({ error: 'Activa Pedidos Web para crear repartidores' });
   }
-  if (rol === 'superadmin' && req.userRole !== 'superadmin') {
-    return res.status(403).json({ error: 'Solo el propietario puede crear otro superadministrador' });
-  }
+  if (rol === 'superadmin') return res.status(403).json({ error: 'Solo puede existir el superadmin propietario' });
 
   try {
     if (req.userRole === 'superadmin' && localRaw !== undefined) {
@@ -263,8 +263,17 @@ router.put('/:id', requireAdmin, async (req, res) => {
       if (rolLimpio === 'repartidor' && !req.modulos?.pedidosWeb && rolActual?.rol !== 'repartidor') {
         return res.status(403).json({ error: 'Activa Pedidos Web para asignar el rol repartidor' });
       }
-      if (rolLimpio === 'superadmin' && req.userRole !== 'superadmin') {
-        return res.status(403).json({ error: 'Solo el propietario puede asignar este rol' });
+      if (rolLimpio === 'superadmin' && String(tenant?.ownerUser) !== String(req.params.id)) {
+        return res.status(403).json({ error: 'Solo el propietario puede tener el rol superadmin' });
+      }
+      if (rolLimpio !== rolActual?.rol && rolLimpio !== 'superadmin') {
+        const planTenant = await Tenant.findById(req.tenantId).select('plan localesAdicionales usuariosExtra').lean();
+        const limits = getPlanLimits(planTenant, await getPlanConfig());
+        const max = limits.cuposPorRol?.[rolLimpio];
+        if (max !== undefined && max !== null) {
+          const used = await Usuario.countDocuments({ tenantId: req.tenantId, rol: rolLimpio });
+          if (used >= max) return res.status(409).json({ error: `Tu plan permite hasta ${max} usuarios con rol ${rolLimpio}. Solicita un cupo adicional.` });
+        }
       }
       actualizacion.rol = rolLimpio;
     }

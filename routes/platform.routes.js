@@ -7,6 +7,8 @@ const ProductoBase = require('../models/productBase.model');
 const Venta = require('../models/venta.model');
 const { getAuthPayloadFromRequest } = require('../utils/authToken');
 const { runAsPlatform } = require('../utils/tenantContext');
+const PlanConfig = require('../models/planConfig.model');
+const { STAFF_ROLES, getPlanConfig, getPlanLimits, parsePlanConfig } = require('../utils/planLimits');
 
 const router = express.Router();
 const safe = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
@@ -46,6 +48,17 @@ router.get('/resumen', safe(async (_req, res) => {
   });
 }));
 
+router.get('/planes', safe(async (_req, res) => {
+  return res.json(await getPlanConfig());
+}));
+
+router.put('/planes', safe(async (req, res) => {
+  const config = parsePlanConfig(req.body);
+  if (!config) return res.status(400).json({ error: 'Revisa nombres, precios y limites de los planes' });
+  await PlanConfig.findOneAndUpdate({ key: 'default' }, { $set: config }, { upsert: true, new: true, runValidators: true });
+  return res.json(await getPlanConfig());
+}));
+
 router.get('/usuarios', safe(async (req, res) => {
   const pagina = Math.max(1, Number.parseInt(req.query.pagina, 10) || 1);
   const limite = 25;
@@ -79,7 +92,38 @@ router.get('/negocios/:id', safe(async (req, res) => {
     Usuario.find({ tenantId: tenant._id }, '-password').sort({ nombre: 1 }).lean(),
     Local.find({ tenantId: tenant._id }).sort({ nombre: 1 }).lean(),
   ]);
-  return res.json({ ...summary, users, listaLocales: locales });
+  return res.json({ ...summary, users, listaLocales: locales, limitesPlan: getPlanLimits(tenant, await getPlanConfig()) });
+}));
+
+router.patch('/negocios/:id/plan', safe(async (req, res) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(400).json({ error: 'Negocio invalido' });
+  const { plan, localesAdicionales, usuariosExtra } = req.body || {};
+  if (!['gratis', 'inicio', 'pro'].includes(plan) ||
+      !Number.isSafeInteger(localesAdicionales) || localesAdicionales < 0 || localesAdicionales > 1000 ||
+      (plan !== 'pro' && localesAdicionales !== 0) ||
+      !usuariosExtra || STAFF_ROLES.some((role) => !Number.isSafeInteger(usuariosExtra[role]) || usuariosExtra[role] < 0 || usuariosExtra[role] > 1000) ||
+      (plan === 'gratis' && STAFF_ROLES.some((role) => usuariosExtra[role] !== 0))) {
+    return res.status(400).json({ error: 'Seleccion de plan, locales o cupos adicionales invalida' });
+  }
+  const tenant = await Tenant.findById(req.params.id);
+  if (!tenant) return res.status(404).json({ error: 'Negocio no encontrado' });
+  const config = await getPlanConfig();
+  const limits = getPlanLimits({ plan, localesAdicionales, usuariosExtra }, config);
+  const [usuarios, locales, usuariosPorRol, superadmins] = await Promise.all([
+    Usuario.countDocuments({ tenantId: tenant._id }),
+    Local.countDocuments({ tenantId: tenant._id }),
+    Promise.all(STAFF_ROLES.map((role) => Usuario.countDocuments({ tenantId: tenant._id, rol: role }))),
+    Usuario.countDocuments({ tenantId: tenant._id, rol: 'superadmin' }),
+  ]);
+  if ((limits.cuposPorRol && (superadmins !== 1 || STAFF_ROLES.some((role, index) => usuariosPorRol[index] > limits.cuposPorRol[role]))) ||
+      (limits.maxLocales !== null && locales > limits.maxLocales)) {
+    return res.status(409).json({ error: `El negocio ya tiene ${usuarios} usuarios y ${locales} locales. Elige cupos por rol y locales que los cubran.` });
+  }
+  tenant.plan = plan;
+  tenant.localesAdicionales = localesAdicionales;
+  tenant.usuariosExtra = usuariosExtra;
+  await tenant.save();
+  return res.json({ _id: tenant._id, plan, localesAdicionales, usuariosExtra, limitesPlan: limits });
 }));
 
 router.patch('/negocios/:id/estado', safe(async (req, res) => {
